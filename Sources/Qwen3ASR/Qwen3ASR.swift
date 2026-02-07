@@ -281,7 +281,7 @@ public extension Qwen3ASRModel {
         progressHandler?(0.1, "Downloading model...")
 
         // Get cache directory
-        let cacheDir = getCacheDirectory(for: modelId)
+        let cacheDir = try getCacheDirectory(for: modelId)
 
         // Download weights if needed
         if !weightsExist(in: cacheDir) {
@@ -322,13 +322,49 @@ public extension Qwen3ASRModel {
         return model
     }
 
-    private static func getCacheDirectory(for modelId: String) -> URL {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("qwen3-asr")
-            .appendingPathComponent(modelId.replacingOccurrences(of: "/", with: "_"))
+    private static func getCacheDirectory(for modelId: String) throws -> URL {
+        let cacheKey = sanitizedCacheKey(for: modelId)
+        let fm = FileManager.default
 
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        // Allow callers (and CI/sandboxes) to override the cache location.
+        // Uses a directory path; model subfolders are created underneath it.
+        let baseCacheDir: URL
+        if let override = ProcessInfo.processInfo.environment["QWEN3_ASR_CACHE_DIR"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            baseCacheDir = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            baseCacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        }
+
+        let cacheDir = baseCacheDir
+            .appendingPathComponent("qwen3-asr", isDirectory: true)
+            .appendingPathComponent(cacheKey, isDirectory: true)
+
+        try fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
         return cacheDir
+    }
+
+    /// Convert an arbitrary modelId into a single, safe path component for on-disk caching.
+    /// This avoids path traversal (`..`) and keeps cache paths stable across runs.
+    private static func sanitizedCacheKey(for modelId: String) -> String {
+        // Keep the historical behavior for common HF model IDs while disallowing path separators.
+        let replaced = modelId.replacingOccurrences(of: "/", with: "_")
+
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        var scalars: [UnicodeScalar] = []
+        scalars.reserveCapacity(replaced.unicodeScalars.count)
+        for s in replaced.unicodeScalars {
+            scalars.append(allowed.contains(s) ? s : "_")
+        }
+
+        var cleaned = String(String.UnicodeScalarView(scalars))
+        cleaned = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "._"))
+
+        if cleaned.isEmpty || cleaned == "." || cleaned == ".." {
+            cleaned = "model"
+        }
+
+        return cleaned
     }
 
     private static func weightsExist(in directory: URL) -> Bool {
@@ -337,12 +373,44 @@ public extension Qwen3ASRModel {
         return contents.contains { $0.pathExtension == "safetensors" }
     }
 
+    private static func validatedRemoteFileName(_ file: String) throws -> String {
+        // Reject any attempt to provide a path instead of a single file name.
+        let base = URL(fileURLWithPath: file).lastPathComponent
+        guard base == file else {
+            throw DownloadError.invalidRemoteFileName(file)
+        }
+
+        // Disallow hidden files and path traversal.
+        guard !base.isEmpty, !base.hasPrefix("."), !base.contains("..") else {
+            throw DownloadError.invalidRemoteFileName(file)
+        }
+
+        // Keep this strict: we only expect HF artifact names like `model-00001-of-00002.safetensors`.
+        guard base.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+            throw DownloadError.invalidRemoteFileName(file)
+        }
+
+        return base
+    }
+
+    private static func validatedLocalPath(directory: URL, fileName: String) throws -> URL {
+        let local = directory.appendingPathComponent(fileName, isDirectory: false)
+        let dirPath = directory.standardizedFileURL.path
+        let localPath = local.standardizedFileURL.path
+        let prefix = dirPath.hasSuffix("/") ? dirPath : (dirPath + "/")
+        guard localPath.hasPrefix(prefix) else {
+            throw DownloadError.invalidRemoteFileName(fileName)
+        }
+        return local
+    }
+
     private static func downloadWeights(
         modelId: String,
         to directory: URL,
         progressHandler: ((Double) -> Void)?
     ) async throws {
         let baseURL = "https://huggingface.co/\(modelId)/resolve/main"
+        let session = URLSession(configuration: .ephemeral)
 
         // Files to download (config and tokenizer)
         var filesToDownload = [
@@ -356,7 +424,7 @@ public extension Qwen3ASRModel {
 
         if !FileManager.default.fileExists(atPath: indexPath.path) {
             let indexURL = URL(string: "\(baseURL)/model.safetensors.index.json")!
-            if let (indexData, indexResponse) = try? await URLSession.shared.data(from: indexURL),
+            if let (indexData, indexResponse) = try? await session.data(from: indexURL),
                let httpResponse = indexResponse as? HTTPURLResponse,
                httpResponse.statusCode == 200 {
                 try indexData.write(to: indexPath)
@@ -379,7 +447,8 @@ public extension Qwen3ASRModel {
         filesToDownload.append(contentsOf: modelFiles)
 
         for (index, file) in filesToDownload.enumerated() {
-            let localPath = directory.appendingPathComponent(file)
+            let safeFile = try validatedRemoteFileName(file)
+            let localPath = try validatedLocalPath(directory: directory, fileName: safeFile)
 
             if FileManager.default.fileExists(atPath: localPath.path) {
                 progressHandler?(Double(index + 1) / Double(filesToDownload.count))
@@ -388,8 +457,8 @@ public extension Qwen3ASRModel {
 
             print("Downloading: \(file)")
 
-            let url = URL(string: "\(baseURL)/\(file)")!
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let url = URL(string: "\(baseURL)/\(safeFile)")!
+            let (data, response) = try await session.data(from: url)
 
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {
@@ -407,11 +476,14 @@ public extension Qwen3ASRModel {
 
 public enum DownloadError: Error, LocalizedError {
     case failedToDownload(String)
+    case invalidRemoteFileName(String)
 
     public var errorDescription: String? {
         switch self {
         case .failedToDownload(let file):
             return "Failed to download: \(file)"
+        case .invalidRemoteFileName(let file):
+            return "Refusing to write unsafe remote file name: \(file)"
         }
     }
 }

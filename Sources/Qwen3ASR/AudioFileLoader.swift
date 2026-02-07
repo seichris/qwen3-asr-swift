@@ -40,6 +40,11 @@ public enum AudioFileLoader {
             throw AudioLoadError.invalidWAVFile
         }
 
+        // Basic bounds sanity for fixed-offset fields used below.
+        guard data.count >= 36 else {
+            throw AudioLoadError.invalidWAVFile
+        }
+
         // Check RIFF header
         let riff = String(data: data[0..<4], encoding: .ascii)
         guard riff == "RIFF" else {
@@ -62,33 +67,64 @@ public enum AudioFileLoader {
             throw AudioLoadError.unsupportedFormat("Not PCM format")
         }
 
+        guard numChannels > 0 else {
+            throw AudioLoadError.invalidWAVFile
+        }
+
         guard bitsPerSample == 16 else {
             throw AudioLoadError.unsupportedFormat("Not 16-bit")
         }
 
         // Find data chunk
         var dataOffset = 36
+        var dataChunkSize: UInt32? = nil
         while dataOffset < data.count - 8 {
             let chunkId = String(data: data[dataOffset..<(dataOffset+4)], encoding: .ascii)
             let chunkSize = data[(dataOffset+4)..<(dataOffset+8)].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
 
             if chunkId == "data" {
                 dataOffset += 8
+                dataChunkSize = chunkSize
                 break
             }
-            dataOffset += 8 + Int(chunkSize)
+
+            // Validate chunk advance to avoid integer overflow and out-of-bounds.
+            if chunkSize > UInt32(Int.max) {
+                throw AudioLoadError.invalidWAVFile
+            }
+            let nextOffset = dataOffset + 8 + Int(chunkSize)
+            guard nextOffset >= dataOffset, nextOffset <= data.count else {
+                throw AudioLoadError.invalidWAVFile
+            }
+            dataOffset = nextOffset
         }
 
         // Read samples
-        let sampleData = data[dataOffset...]
-        let sampleCount = sampleData.count / 2 / Int(numChannels)
+        guard let chunkSize = dataChunkSize else {
+            throw AudioLoadError.invalidWAVFile
+        }
+        if chunkSize > UInt32(Int.max) {
+            throw AudioLoadError.invalidWAVFile
+        }
+        let chunkSizeInt = Int(chunkSize)
+        guard dataOffset >= 0, dataOffset <= data.count, dataOffset + chunkSizeInt <= data.count else {
+            throw AudioLoadError.invalidWAVFile
+        }
+
+        let sampleData = data[dataOffset..<(dataOffset + chunkSizeInt)]
+        let channels = Int(numChannels)
+        let bytesPerSample = 2
+        guard channels > 0 else { throw AudioLoadError.invalidWAVFile }
+        let frameSize = bytesPerSample * channels
+        guard frameSize > 0 else { throw AudioLoadError.invalidWAVFile }
+        let sampleCount = sampleData.count / frameSize
 
         var samples = [Float](repeating: 0, count: sampleCount)
         sampleData.withUnsafeBytes { ptr in
             let int16Ptr = ptr.bindMemory(to: Int16.self)
             for i in 0..<sampleCount {
                 // Take first channel only
-                let sampleIndex = i * Int(numChannels)
+                let sampleIndex = i * channels
                 if sampleIndex < int16Ptr.count {
                     samples[i] = Float(int16Ptr[sampleIndex]) / 32768.0
                 }

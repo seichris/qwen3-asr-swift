@@ -1,5 +1,28 @@
 import Foundation
+import MLX
 import Qwen3ASR
+
+private func runMain(audioPath: String) async throws {
+    print("Loading model...")
+
+    let model = try await Qwen3ASRModel.fromPretrained(
+        modelId: "mlx-community/Qwen3-ASR-0.6B-4bit"
+    ) { progress, status in
+        print("  [\(Int(progress * 100))%] \(status)")
+    }
+
+    print("Loading audio: \(audioPath)")
+    let audio = try AudioFileLoader.load(url: URL(fileURLWithPath: audioPath), targetSampleRate: 24000)
+    let seconds = Double(audio.count) / 24000.0
+    print(String(format: "  Loaded %d samples (%.2fs)", audio.count, seconds))
+
+    print("Transcribing...")
+    let result = model.transcribe(
+        audio: audio,
+        sampleRate: 24000
+    )
+    print("Result: \(result)")
+}
 
 // Entry point
 Task {
@@ -13,25 +36,16 @@ Task {
     }
 
     let audioPath = args[1]
+    let deviceOverride = ProcessInfo.processInfo.environment["QWEN3_ASR_DEVICE"]?.lowercased()
 
-    print("Loading model...")
     do {
-        let model = try await Qwen3ASRModel.fromPretrained(
-            modelId: "mlx-community/Qwen3-ASR-0.6B-4bit"
-        ) { progress, status in
-            print("  [\(Int(progress * 100))%] \(status)")
+        if deviceOverride == "cpu" {
+            try await Device.withDefaultDevice(.cpu) {
+                try await runMain(audioPath: audioPath)
+            }
+        } else {
+            try await runMain(audioPath: audioPath)
         }
-
-        print("Loading audio: \(audioPath)")
-        let audio = try AudioFileLoader.load(url: URL(fileURLWithPath: audioPath), targetSampleRate: 24000)
-        print("  Loaded \(audio.count) samples (\(String(format: "%.2f", Double(audio.count) / 24000.0))s)")
-
-        print("Transcribing...")
-        let result = model.transcribe(
-            audio: audio,
-            sampleRate: 24000
-        )
-        print("Result: \(result)")
         exit(0)
     } catch {
         print("Error: \(error)")
