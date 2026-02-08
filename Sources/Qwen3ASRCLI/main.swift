@@ -23,15 +23,19 @@ private func runRealtime(
         print("  [\(Int(progress * 100))%] \(status)")
     }
 
+    // Normalize CLI language identifiers (e.g. "en" -> "English", "cn" -> "Chinese").
+    let normalizedTo = Qwen3ASRLanguage.normalize(targetLanguage)
+    let normalizedFrom = Qwen3ASRLanguage.normalizeOptional(sourceLanguage)
+
     print("Starting realtime transcription...")
-    print("Target language: \(targetLanguage)")
-    print("Source language: \(sourceLanguage ?? "auto-detect")")
+    print("Target language: \(normalizedTo)")
+    print("Source language: \(normalizedFrom ?? "auto-detect")")
     print("Window: \(windowSeconds)s, Step: \(stepMs)ms")
     print("Press Ctrl+C to stop\n")
 
     let options = RealtimeTranslationOptions(
-        targetLanguage: targetLanguage,
-        sourceLanguage: sourceLanguage,
+        targetLanguage: normalizedTo,
+        sourceLanguage: normalizedFrom,
         windowSeconds: windowSeconds,
         stepMs: stepMs,
         enableVAD: enableVAD,
@@ -214,7 +218,7 @@ private func parseArguments() -> Arguments? {
                     targetLanguage = args[i + 1]
                     i += 2
                 } else {
-                    print("Error: --to requires a language code")
+                    print("Error: --to requires a language (e.g. en, English, zh, Chinese)")
                     return nil
                 }
             case "--from":
@@ -223,7 +227,7 @@ private func parseArguments() -> Arguments? {
                     sourceLanguage = lang == "auto" ? nil : lang
                     i += 2
                 } else {
-                    print("Error: --from requires a language code")
+                    print("Error: --from requires a language (e.g. auto, zh, Chinese)")
                     return nil
                 }
             case "--window":
@@ -311,6 +315,10 @@ private func printUsage() {
     print("  --no-translate            Disable translation (transcription only)")
     print("  --jsonl                   Output in JSONL format")
     print("")
+    print("Language values:")
+    print("  You can pass common codes or names. The CLI normalizes them for the model prompt.")
+    print("  Examples: en -> English, zh/cn -> Chinese, ja -> Japanese")
+    print("")
     print("Environment variables:")
     print("  QWEN3_ASR_MODEL           Model ID (default: mlx-community/Qwen3-ASR-0.6B-4bit)")
     print("  QWEN3_ASR_DEVICE          Set to 'cpu' to force CPU mode")
@@ -332,6 +340,9 @@ private func printRealtimeHelp() {
     print("  --no-vad         Disable voice activity detection")
     print("  --no-translate   Transcribe only, no translation")
     print("  --jsonl          Output structured JSONL")
+    print("")
+    print("Language values:")
+    print("  Examples: --to en, --to English, --from zh, --from Chinese")
 }
 
 // MARK: - Entry Point
