@@ -58,10 +58,6 @@ final class LiveTranslateViewModel: ObservableObject {
         if let src = activeAudioSource {
             Task { await src.stop() }
         }
-
-        // Cancel any in-flight translation/transcription work quickly.
-        // (This will also cancel `.translationTask` in the view.)
-        isRunning = false
     }
 
     @available(iOS 18.0, macOS 15.0, *)
@@ -79,7 +75,8 @@ final class LiveTranslateViewModel: ObservableObject {
             log.info("runNoTranslation() start. from=\(from.displayName, privacy: .public)")
             let model = try await loadModelIfNeeded(modelId: modelId)
 
-            let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
+            // Keep buffer small so Stop doesn't take ages draining queued frames.
+            let audioSource = MicrophoneAudioSource(frameSizeMs: 20, bufferedFrames: 5)
             activeAudioSource = audioSource
             defer {
                 activeAudioSource = nil
@@ -151,7 +148,8 @@ final class LiveTranslateViewModel: ObservableObject {
 
             let model = try await loadModelIfNeeded(modelId: modelId)
 
-            let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
+            // Keep buffer small so Stop doesn't take ages draining queued frames.
+            let audioSource = MicrophoneAudioSource(frameSizeMs: 20, bufferedFrames: 5)
             activeAudioSource = audioSource
             defer {
                 activeAudioSource = nil
@@ -241,7 +239,12 @@ final class LiveTranslateViewModel: ObservableObject {
             if stopRequested { return }
             if Task.isCancelled { return }
             do {
-                let translated = try await AppleTranslation.translate(cleaned, using: translationSession)
+                // Translation can be slow and should not block Stop. Bound it so we don't hang the run loop.
+                let translated = try await translateWithTimeout(
+                    cleaned,
+                    using: translationSession,
+                    timeoutSeconds: 1.2
+                )
                 if Task.isCancelled { return }
                 if stopRequested { return }
                 let t = translated.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -264,6 +267,28 @@ final class LiveTranslateViewModel: ObservableObject {
             // Not used in the app path; translation is computed here to keep TranslationSession scoped
             // to the `.translationTask` lifecycle.
             break
+        }
+    }
+
+    @available(iOS 18.0, macOS 15.0, *)
+    private func translateWithTimeout(
+        _ text: String,
+        using session: TranslationSession,
+        timeoutSeconds: Double
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await AppleTranslation.translate(text, using: session)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000.0))
+                return ""
+            }
+
+            // Take whichever finishes first; cancel the other.
+            let first = try await group.next() ?? ""
+            group.cancelAll()
+            return first
         }
     }
     #endif

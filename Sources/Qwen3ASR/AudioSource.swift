@@ -18,6 +18,7 @@ public protocol AudioFrameSource: Actor {
 public actor MicrophoneAudioSource: AudioFrameSource {
     public let sampleRate: Int = 16000  // WhisperFeatureExtractor reference rate
     public let frameSize: Int  // Number of samples per frame (e.g., 320 for 20ms at 16kHz)
+    public let bufferedFrames: Int
     
     private var audioEngine: AVAudioEngine?
     private var converter: AVAudioConverter?
@@ -27,13 +28,14 @@ public actor MicrophoneAudioSource: AudioFrameSource {
     private var pendingSamples: [Float] = []
     private var pendingStartIndex: Int = 0
     
-    public init(frameSizeMs: Double = 20.0) {
+    public init(frameSizeMs: Double = 20.0, bufferedFrames: Int = 50) {
         // Calculate frame size: sampleRate * frameSizeMs / 1000
         self.frameSize = Int(Double(sampleRate) * frameSizeMs / 1000.0)
+        self.bufferedFrames = max(1, bufferedFrames)
     }
     
     public func frames() -> AsyncStream<[Float]> {
-        AsyncStream(bufferingPolicy: .bufferingNewest(50)) { continuation in
+        AsyncStream(bufferingPolicy: .bufferingNewest(bufferedFrames)) { continuation in
             Task { [weak self] in
                 await self?.setContinuation(continuation)
             }
