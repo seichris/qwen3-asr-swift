@@ -62,10 +62,11 @@ public class Qwen3ASRModel {
         // Extract mel features
         let melFeatures = featureExtractor.process(audio, sampleRate: sampleRate)
 
-        // Debug mel features
-        let melFlat = melFeatures.flattened()
-        print("DEBUG: Mel features shape: \(melFeatures.shape)")
-        print("DEBUG: Mel features - mean: \(mean(melFlat).item(Float.self)), std: \(sqrt(variance(melFlat)).item(Float.self))")
+        if Qwen3ASRDebug.enabled {
+            let melFlat = melFeatures.flattened()
+            Qwen3ASRDebug.log("DEBUG: Mel features shape: \(melFeatures.shape)")
+            Qwen3ASRDebug.log("DEBUG: Mel features - mean: \(mean(melFlat).item(Float.self)), std: \(sqrt(variance(melFlat)).item(Float.self))")
+        }
 
         // Add batch dimension: [mel, time] -> [1, mel, time]
         let batchedFeatures = melFeatures.expandedDimensions(axis: 0)
@@ -76,11 +77,12 @@ public class Qwen3ASRModel {
         // Add batch dimension for consistency: [time, features] -> [1, time, features]
         audioEmbeds = audioEmbeds.expandedDimensions(axis: 0)
 
-        // Debug audio embeddings
-        let embedsFlat = audioEmbeds.flattened()
-        print("DEBUG: Audio embeds shape: \(audioEmbeds.shape)")
-        print("DEBUG: Audio embeds - mean: \(mean(embedsFlat).item(Float.self)), std: \(sqrt(variance(embedsFlat)).item(Float.self))")
-        print("DEBUG: Audio embeds - min: \(min(embedsFlat).item(Float.self)), max: \(max(embedsFlat).item(Float.self))")
+        if Qwen3ASRDebug.enabled {
+            let embedsFlat = audioEmbeds.flattened()
+            Qwen3ASRDebug.log("DEBUG: Audio embeds shape: \(audioEmbeds.shape)")
+            Qwen3ASRDebug.log("DEBUG: Audio embeds - mean: \(mean(embedsFlat).item(Float.self)), std: \(sqrt(variance(embedsFlat)).item(Float.self))")
+            Qwen3ASRDebug.log("DEBUG: Audio embeds - min: \(min(embedsFlat).item(Float.self)), max: \(max(embedsFlat).item(Float.self))")
+        }
 
         // Check if text decoder is loaded
         guard let textDecoder = textDecoder else {
@@ -166,14 +168,14 @@ public class Qwen3ASRModel {
             let langTokens = tokenizer.encode(langPrefix)
             inputIds.append(contentsOf: langTokens.map { Int32($0) })
             inputIds.append(Int32(asrTextId))
-            print("DEBUG: Forcing language: \(lang)")
+            Qwen3ASRDebug.log("DEBUG: Forcing language: \(lang)")
         } else {
             // Auto-detect: don't add anything after "assistant\n"
             // Model will generate: "language Russian<asr_text>Привет" (for example)
-            print("DEBUG: Auto-detect mode - model generates full language tag + text")
+            Qwen3ASRDebug.log("DEBUG: Auto-detect mode - model generates full language tag + text")
         }
 
-        print("DEBUG: Input IDs length: \(inputIds.count), audio tokens: \(numAudioTokens) at positions \(audioStartIndex)..<\(audioEndIndex)")
+        Qwen3ASRDebug.log("DEBUG: Input IDs length: \(inputIds.count), audio tokens: \(numAudioTokens) at positions \(audioStartIndex)..<\(audioEndIndex)")
 
         // Get text embeddings for all tokens
         let inputIdsTensor = MLXArray(inputIds).expandedDimensions(axis: 0)  // [1, seq_len]
@@ -182,18 +184,21 @@ public class Qwen3ASRModel {
         // Debug: compare embedding scales
         let textEmbedsFlat = inputEmbeds.flattened()
         let textStd = sqrt(variance(textEmbedsFlat)).item(Float.self)
-        print("DEBUG: Text embeds - mean: \(mean(textEmbedsFlat).item(Float.self)), std: \(textStd)")
 
         let audioEmbedsFlat = audioEmbeds.flattened()
         let audioStd = sqrt(variance(audioEmbedsFlat)).item(Float.self)
-        print("DEBUG: Audio embeds (before scaling) - mean: \(mean(audioEmbedsFlat).item(Float.self)), std: \(audioStd)")
+
+        if Qwen3ASRDebug.enabled {
+            Qwen3ASRDebug.log("DEBUG: Text embeds - mean: \(mean(textEmbedsFlat).item(Float.self)), std: \(textStd)")
+            Qwen3ASRDebug.log("DEBUG: Audio embeds (before scaling) - mean: \(mean(audioEmbedsFlat).item(Float.self)), std: \(audioStd)")
+        }
 
         // Scale audio embeddings to match text embedding variance
         var scaledAudioEmbeds = audioEmbeds
         if audioStd > 0 {
             let scaleFactor = textStd / audioStd
             scaledAudioEmbeds = audioEmbeds * scaleFactor
-            print("DEBUG: Scaling audio embeds by \(scaleFactor) to match text std")
+            Qwen3ASRDebug.log("DEBUG: Scaling audio embeds by \(scaleFactor) to match text std")
         }
 
         // Replace audio_pad token positions with actual audio embeddings
@@ -207,7 +212,7 @@ public class Qwen3ASRModel {
 
         inputEmbeds = concatenated([beforeAudio, scaledAudioEmbeds, afterAudio], axis: 1)
 
-        print("DEBUG: Prompt structure - before_audio:\(audioStartIndex), audio:\(numAudioTokens), after_audio:\(inputIds.count - audioEndIndex)")
+        Qwen3ASRDebug.log("DEBUG: Prompt structure - before_audio:\(audioStartIndex), audio:\(numAudioTokens), after_audio:\(inputIds.count - audioEndIndex)")
 
         // Initialize KV cache
         var cache: [(MLXArray, MLXArray)]? = nil
@@ -227,19 +232,21 @@ public class Qwen3ASRModel {
         var nextToken = argMax(logits, axis: -1).squeezed().item(Int32.self)
         generatedTokens.append(nextToken)
 
-        // Debug: check logits stats (using MLX ops instead of slow loop)
-        let logitsFlat = logits.squeezed()
-        print("DEBUG: Logits shape: \(logitsFlat.shape)")
-        print("DEBUG: Logits stats - mean: \(mean(logitsFlat).item(Float.self)), max: \(max(logitsFlat).item(Float.self)), min: \(min(logitsFlat).item(Float.self))")
+        if Qwen3ASRDebug.enabled {
+            // Debug: check logits stats (using MLX ops instead of slow loop)
+            let logitsFlat = logits.squeezed()
+            Qwen3ASRDebug.log("DEBUG: Logits shape: \(logitsFlat.shape)")
+            Qwen3ASRDebug.log("DEBUG: Logits stats - mean: \(mean(logitsFlat).item(Float.self)), max: \(max(logitsFlat).item(Float.self)), min: \(min(logitsFlat).item(Float.self))")
 
-        print("DEBUG: First token generated: \(nextToken) (EOS=\(Qwen3ASRTokens.eosTokenId))")
-        print("DEBUG: Input embeds shape: \(inputEmbeds.shape), hidden states shape: \(hiddenStates.shape)")
+            Qwen3ASRDebug.log("DEBUG: First token generated: \(nextToken) (EOS=\(Qwen3ASRTokens.eosTokenId))")
+            Qwen3ASRDebug.log("DEBUG: Input embeds shape: \(inputEmbeds.shape), hidden states shape: \(hiddenStates.shape)")
+        }
 
         // Continue generating
         for iteration in 1..<maxTokens {
             // Check for EOS
             if nextToken == Int32(Qwen3ASRTokens.eosTokenId) {
-                print("DEBUG: EOS token reached at iteration \(iteration)")
+                Qwen3ASRDebug.log("DEBUG: EOS token reached at iteration \(iteration)")
                 break
             }
 
@@ -257,8 +264,7 @@ public class Qwen3ASRModel {
             generatedTokens.append(nextToken)
         }
 
-        // Debug: print first few generated tokens
-        print("DEBUG: Generated \(generatedTokens.count) tokens: \(Array(generatedTokens.prefix(20)))")
+        Qwen3ASRDebug.log("DEBUG: Generated \(generatedTokens.count) tokens: \(Array(generatedTokens.prefix(20)))")
 
         // Decode tokens to text
         if let tokenizer = tokenizer {
@@ -300,7 +306,9 @@ public extension Qwen3ASRModel {
         if FileManager.default.fileExists(atPath: vocabPath.path) {
             let tokenizer = Qwen3Tokenizer()
             try tokenizer.load(from: vocabPath)
-            tokenizer.debugTokenMappings()  // Debug: verify token IDs
+            if Qwen3ASRDebug.enabled {
+                tokenizer.debugTokenMappings()  // Debug: verify token IDs
+            }
             model.setTokenizer(tokenizer)
         }
 
