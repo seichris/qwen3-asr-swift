@@ -323,7 +323,7 @@ public extension Qwen3ASRModel {
     }
 
     private static func getCacheDirectory(for modelId: String) throws -> URL {
-        let cacheKey = sanitizedCacheKey(for: modelId)
+        let cacheKey = _sanitizedCacheKey(for: modelId)
         let fm = FileManager.default
 
         // Allow callers (and CI/sandboxes) to override the cache location.
@@ -346,7 +346,7 @@ public extension Qwen3ASRModel {
 
     /// Convert an arbitrary modelId into a single, safe path component for on-disk caching.
     /// This avoids path traversal (`..`) and keeps cache paths stable across runs.
-    private static func sanitizedCacheKey(for modelId: String) -> String {
+    static func _sanitizedCacheKey(for modelId: String) -> String {
         // Keep the historical behavior for common HF model IDs while disallowing path separators.
         let replaced = modelId.replacingOccurrences(of: "/", with: "_")
 
@@ -373,7 +373,7 @@ public extension Qwen3ASRModel {
         return contents.contains { $0.pathExtension == "safetensors" }
     }
 
-    private static func validatedRemoteFileName(_ file: String) throws -> String {
+    static func _validatedRemoteFileName(_ file: String) throws -> String {
         // Reject any attempt to provide a path instead of a single file name.
         let base = URL(fileURLWithPath: file).lastPathComponent
         guard base == file else {
@@ -393,7 +393,7 @@ public extension Qwen3ASRModel {
         return base
     }
 
-    private static func validatedLocalPath(directory: URL, fileName: String) throws -> URL {
+    static func _validatedLocalPath(directory: URL, fileName: String) throws -> URL {
         let local = directory.appendingPathComponent(fileName, isDirectory: false)
         let dirPath = directory.standardizedFileURL.path
         let localPath = local.standardizedFileURL.path
@@ -447,8 +447,8 @@ public extension Qwen3ASRModel {
         filesToDownload.append(contentsOf: modelFiles)
 
         for (index, file) in filesToDownload.enumerated() {
-            let safeFile = try validatedRemoteFileName(file)
-            let localPath = try validatedLocalPath(directory: directory, fileName: safeFile)
+            let safeFile = try _validatedRemoteFileName(file)
+            let localPath = try _validatedLocalPath(directory: directory, fileName: safeFile)
 
             if FileManager.default.fileExists(atPath: localPath.path) {
                 progressHandler?(Double(index + 1) / Double(filesToDownload.count))

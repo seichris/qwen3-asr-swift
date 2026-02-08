@@ -40,11 +40,6 @@ public enum AudioFileLoader {
             throw AudioLoadError.invalidWAVFile
         }
 
-        // Basic bounds sanity for fixed-offset fields used below.
-        guard data.count >= 36 else {
-            throw AudioLoadError.invalidWAVFile
-        }
-
         // Check RIFF header
         let riff = String(data: data[0..<4], encoding: .ascii)
         guard riff == "RIFF" else {
