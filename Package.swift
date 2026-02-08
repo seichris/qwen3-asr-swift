@@ -19,7 +19,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.21.0"),
-        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0")
     ],
     targets: [
         .target(
@@ -28,13 +27,15 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift")
+            ],
+            linkerSettings: [
+                .linkedFramework("AVFoundation", .when(platforms: [.macOS, .iOS]))
             ]
         ),
         .executableTarget(
             name: "Qwen3ASRCLI",
             dependencies: [
-                "Qwen3ASR",
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
+                "Qwen3ASR"
             ]
         ),
         .testTarget(

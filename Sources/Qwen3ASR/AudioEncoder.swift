@@ -328,8 +328,8 @@ public class Qwen3AudioEncoder: Module {
         let timeFrames = melFeatures.dim(2)
         let chunkSize = config.nWindow * 2  // 100
 
-        print("DEBUG AudioEncoder: Input shape [batch=\(batch), mel=\(melBins), time=\(timeFrames)]")
-        print("DEBUG AudioEncoder: Chunk size = \(chunkSize), expected output tokens = \(getOutputLength(timeFrames))")
+        Qwen3ASRDebug.log("AudioEncoder: Input shape [batch=\(batch), mel=\(melBins), time=\(timeFrames)]")
+        Qwen3ASRDebug.log("AudioEncoder: Chunk size = \(chunkSize), expected output tokens = \(getOutputLength(timeFrames))")
 
         // Calculate number of chunks
         let numChunks = (timeFrames + chunkSize - 1) / chunkSize  // ceil division
@@ -373,7 +373,7 @@ public class Qwen3AudioEncoder: Module {
         // Add channel dim: [numChunks, mel, time, 1] for Conv2d (NHWC)
         var x = paddedFeature.expandedDimensions(axis: -1)
 
-        print("DEBUG AudioEncoder: Padded feature shape [\(x.dim(0)), \(x.dim(1)), \(x.dim(2)), \(x.dim(3))]")
+        Qwen3ASRDebug.log("AudioEncoder: Padded feature shape [\(x.dim(0)), \(x.dim(1)), \(x.dim(2)), \(x.dim(3))]")
 
         // Process through conv layers
         x = conv2d1(x)
@@ -389,25 +389,28 @@ public class Qwen3AudioEncoder: Module {
         let timeAfterConv = x.dim(2)  // ~13 for 100 input frames
         let channels = x.dim(3)  // 480
 
-        print("DEBUG AudioEncoder: After conv - shape [\(numChunksBatch), \(freq), \(timeAfterConv), \(channels)]")
+        Qwen3ASRDebug.log("AudioEncoder: After conv - shape [\(numChunksBatch), \(freq), \(timeAfterConv), \(channels)]")
 
         // Transpose and reshape: [numChunks, freq, time, channels] -> [numChunks, time, channels*freq]
         x = x.transposed(0, 2, 3, 1)  // [numChunks, time, channels, freq]
         x = x.reshaped(numChunksBatch, timeAfterConv, channels * freq)  // [numChunks, time, 7680]
 
-        print("DEBUG AudioEncoder: After reshape - shape [\(x.dim(0)), \(x.dim(1)), \(x.dim(2))]")
+        Qwen3ASRDebug.log("AudioEncoder: After reshape - shape [\(x.dim(0)), \(x.dim(1)), \(x.dim(2))]")
 
         // Project through conv_out (7680 -> 896)
         x = convOut(x)
 
-        print("DEBUG AudioEncoder: After conv_out - shape [\(x.dim(0)), \(x.dim(1)), \(x.dim(2))]")
+        Qwen3ASRDebug.log("AudioEncoder: After conv_out - shape [\(x.dim(0)), \(x.dim(1)), \(x.dim(2))]")
 
         // Add sinusoidal position embeddings - same for each chunk!
         // This is the key difference from before: positions 0 to timeAfterConv-1 for EACH chunk
         let posEmbed = createSinusoidalPositionEmbeddings(seqLen: timeAfterConv, dModel: config.dModel)
         x = x + posEmbed  // Broadcasting: [numChunks, time, 896] + [1, time, 896]
 
-        print("DEBUG AudioEncoder: After pos embed - mean: \(mean(x.flattened()).item(Float.self)), std: \(sqrt(variance(x.flattened())).item(Float.self))")
+        if Qwen3ASRDebug.enabled {
+            let flat = x.flattened()
+            Qwen3ASRDebug.log("AudioEncoder: After pos embed - mean: \(mean(flat).item(Float.self)), std: \(sqrt(variance(flat)).item(Float.self))")
+        }
 
         // Calculate valid lengths after CNN for each chunk
         var featureLensAfterCnn = [Int]()
@@ -419,7 +422,7 @@ public class Qwen3AudioEncoder: Module {
             featureLensAfterCnn.append(featLen)
         }
 
-        print("DEBUG AudioEncoder: Feature lens after CNN: \(featureLensAfterCnn)")
+        Qwen3ASRDebug.log("AudioEncoder: Feature lens after CNN: \(featureLensAfterCnn)")
 
         // Extract valid portions and concatenate
         var hiddenList: [MLXArray] = []
@@ -433,7 +436,7 @@ public class Qwen3AudioEncoder: Module {
         var hiddenStates = concatenated(hiddenList, axis: 0)
         let totalTokens = hiddenStates.dim(0)
 
-        print("DEBUG AudioEncoder: Hidden states (concatenated) - shape [\(totalTokens), \(hiddenStates.dim(1))]")
+        Qwen3ASRDebug.log("AudioEncoder: Hidden states (concatenated) - shape [\(totalTokens), \(hiddenStates.dim(1))]")
 
         // Build cumulative sequence lengths for block attention mask
         let maxLenAfterCnn = featureLensAfterCnn.max() ?? 13
@@ -460,7 +463,7 @@ public class Qwen3AudioEncoder: Module {
             cuSeqlens.append(cumsum)
         }
 
-        print("DEBUG AudioEncoder: cu_seqlens: \(cuSeqlens)")
+        Qwen3ASRDebug.log("AudioEncoder: cu_seqlens: \(cuSeqlens)")
 
         // Create block attention mask
         let attentionMask = createBlockAttentionMask(seqLen: totalTokens, cuSeqlens: cuSeqlens)
@@ -479,16 +482,20 @@ public class Qwen3AudioEncoder: Module {
         // Post processing
         hiddenStates = lnPost(hiddenStates)
 
-        let postLnFlat = hiddenStates.flattened()
-        print("DEBUG AudioEncoder: After ln_post - mean: \(mean(postLnFlat).item(Float.self)), std: \(sqrt(variance(postLnFlat)).item(Float.self))")
+        if Qwen3ASRDebug.enabled {
+            let postLnFlat = hiddenStates.flattened()
+            Qwen3ASRDebug.log("AudioEncoder: After ln_post - mean: \(mean(postLnFlat).item(Float.self)), std: \(sqrt(variance(postLnFlat)).item(Float.self))")
+        }
 
         // Project to text model dimension (GELU activation)
         hiddenStates = proj1(hiddenStates)
         hiddenStates = gelu(hiddenStates)
         hiddenStates = proj2(hiddenStates)
 
-        let finalFlat = hiddenStates.flattened()
-        print("DEBUG AudioEncoder: Final output - mean: \(mean(finalFlat).item(Float.self)), std: \(sqrt(variance(finalFlat)).item(Float.self)), shape [\(hiddenStates.dim(0)), \(hiddenStates.dim(1))]")
+        if Qwen3ASRDebug.enabled {
+            let finalFlat = hiddenStates.flattened()
+            Qwen3ASRDebug.log("AudioEncoder: Final output - mean: \(mean(finalFlat).item(Float.self)), std: \(sqrt(variance(finalFlat)).item(Float.self)), shape [\(hiddenStates.dim(0)), \(hiddenStates.dim(1))]")
+        }
 
         return hiddenStates
     }

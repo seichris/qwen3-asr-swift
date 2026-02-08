@@ -352,9 +352,10 @@ public class QuantizedTextModel: Module {
         // Create causal attention mask
         let mask = attentionMask ?? createCausalMask(seqLen: seqLen, cacheLen: cacheLen)
 
-        // Debug input
-        let inputFlat = hiddenStates.flattened()
-        print("DEBUG TextDecoder: Input embeds - mean: \(mean(inputFlat).item(Float.self)), std: \(sqrt(variance(inputFlat)).item(Float.self))")
+        if Qwen3ASRDebug.enabled {
+            let inputFlat = hiddenStates.flattened()
+            Qwen3ASRDebug.log("TextDecoder: Input embeds - mean: \(mean(inputFlat).item(Float.self)), std: \(sqrt(variance(inputFlat)).item(Float.self))")
+        }
 
         // Apply decoder layers
         var newCache: [(MLXArray, MLXArray)] = []
@@ -364,17 +365,18 @@ public class QuantizedTextModel: Module {
             hiddenStates = output
             newCache.append(updatedCache)
 
-            // Debug first and last layers
-            if i == 0 || i == 27 {
+            if Qwen3ASRDebug.enabled && (i == 0 || i == 27) {
                 let layerFlat = hiddenStates.flattened()
-                print("DEBUG TextDecoder: After layer \(i) - mean: \(mean(layerFlat).item(Float.self)), std: \(sqrt(variance(layerFlat)).item(Float.self))")
+                Qwen3ASRDebug.log("TextDecoder: After layer \(i) - mean: \(mean(layerFlat).item(Float.self)), std: \(sqrt(variance(layerFlat)).item(Float.self))")
             }
         }
 
         // Final norm
         hiddenStates = norm(hiddenStates)
-        let normFlat = hiddenStates.flattened()
-        print("DEBUG TextDecoder: After final norm - mean: \(mean(normFlat).item(Float.self)), std: \(sqrt(variance(normFlat)).item(Float.self))")
+        if Qwen3ASRDebug.enabled {
+            let normFlat = hiddenStates.flattened()
+            Qwen3ASRDebug.log("TextDecoder: After final norm - mean: \(mean(normFlat).item(Float.self)), std: \(sqrt(variance(normFlat)).item(Float.self))")
+        }
 
         return (hiddenStates, newCache)
     }

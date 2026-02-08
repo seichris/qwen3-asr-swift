@@ -15,8 +15,8 @@ public enum TokenizerError: Error, LocalizedError {
 
 /// Simple tokenizer for Qwen3-ASR that loads from vocab.json
 public class Qwen3Tokenizer {
-    private var idToToken: [Int: String] = [:]
-    private var tokenToId: [String: Int] = [:]
+    internal var idToToken: [Int: String] = [:]
+    internal var tokenToId: [String: Int] = [:]
 
     public var eosTokenId: Int = 151643
     public var padTokenId: Int = 151643
@@ -44,7 +44,7 @@ public class Qwen3Tokenizer {
             try loadAddedTokens(from: configUrl)
         }
 
-        print("Loaded tokenizer with \(idToToken.count) tokens")
+        Qwen3ASRDebug.log("Loaded tokenizer with \(idToToken.count) tokens")
     }
 
     /// Load added tokens from tokenizer_config.json
@@ -69,7 +69,7 @@ public class Qwen3Tokenizer {
                 tokenToId[content] = id
                 addedCount += 1
             }
-            print("Loaded \(addedCount) added tokens from tokenizer_config.json")
+            Qwen3ASRDebug.log("Loaded \(addedCount) added tokens from tokenizer_config.json")
         }
     }
 
@@ -169,15 +169,38 @@ public class Qwen3Tokenizer {
         }
     }
 
-    /// Encode text to token IDs (for completeness)
+    /// Encode text to token IDs using BPE
+    /// - Parameter text: Input text to encode
+    /// - Returns: Array of token IDs
     public func encode(_ text: String) -> [Int] {
-        // Simple character-level encoding for now
-        // Full BPE encoding would be more complex
-        var tokens: [Int] = []
+        // Preprocess text: replace spaces with "Ġ" (GPT-2 BPE convention)
+        var processedText = text
+        if processedText.hasPrefix(" ") {
+            processedText = String(processedText.dropFirst())
+        }
+        processedText = processedText.replacingOccurrences(of: " ", with: "Ġ")
 
-        for char in text {
-            if let id = tokenToId[String(char)] {
-                tokens.append(id)
+        var tokens: [Int] = []
+        var remaining = processedText
+
+        while !remaining.isEmpty {
+            var longestMatch: (token: String, id: Int)? = nil
+
+            // Find longest matching token starting from position 0
+            for length in (1...min(remaining.count, 50)).reversed() {
+                let prefix = String(remaining.prefix(length))
+                if let id = tokenToId[prefix] {
+                    longestMatch = (prefix, id)
+                    break
+                }
+            }
+
+            if let match = longestMatch {
+                tokens.append(match.id)
+                remaining = String(remaining.dropFirst(match.token.count))
+            } else {
+                // No match found, skip this character
+                remaining = String(remaining.dropFirst())
             }
         }
 
