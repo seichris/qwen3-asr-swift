@@ -58,6 +58,10 @@ final class LiveTranslateViewModel: ObservableObject {
         if let src = activeAudioSource {
             Task { await src.stop() }
         }
+
+        // Cancel any in-flight translation/transcription work quickly.
+        // (This will also cancel `.translationTask` in the view.)
+        isRunning = false
     }
 
     @available(iOS 18.0, macOS 15.0, *)
@@ -77,6 +81,14 @@ final class LiveTranslateViewModel: ObservableObject {
 
             let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
             activeAudioSource = audioSource
+            defer {
+                activeAudioSource = nil
+                isStopping = false
+                isRunning = false
+                if case .running = status {
+                    status = (self.model == nil) ? .idle : .ready
+                }
+            }
 
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
@@ -94,6 +106,7 @@ final class LiveTranslateViewModel: ObservableObject {
 
             for await event in stream {
                 if Task.isCancelled { break }
+                if stopRequested { break }
                 await handleNoTranslation(event: event)
             }
 
@@ -140,6 +153,14 @@ final class LiveTranslateViewModel: ObservableObject {
 
             let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
             activeAudioSource = audioSource
+            defer {
+                activeAudioSource = nil
+                isStopping = false
+                isRunning = false
+                if case .running = status {
+                    status = (self.model == nil) ? .idle : .ready
+                }
+            }
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
                 sourceLanguage: from.modelName,
@@ -156,6 +177,7 @@ final class LiveTranslateViewModel: ObservableObject {
 
             for await event in stream {
                 if Task.isCancelled { break }
+                if stopRequested { break }
                 await handle(event: event, translationSession: translationSession)
             }
 
@@ -215,10 +237,13 @@ final class LiveTranslateViewModel: ObservableObject {
             let id = UUID()
             segments.append(.init(id: id, transcript: cleaned, translation: nil, date: event.timestamp))
 
+            // If we're stopping, don't start new translation work.
+            if stopRequested { return }
             if Task.isCancelled { return }
             do {
                 let translated = try await AppleTranslation.translate(cleaned, using: translationSession)
                 if Task.isCancelled { return }
+                if stopRequested { return }
                 let t = translated.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !t.isEmpty else { return }
                 guard let idx = segments.lastIndex(where: { $0.id == id }) else { return }
