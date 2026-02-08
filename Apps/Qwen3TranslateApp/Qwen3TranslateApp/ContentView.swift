@@ -97,7 +97,11 @@ struct ContentView: View {
                 Text("Transcript")
                     .font(.headline)
                 if !vm.partialTranscript.isEmpty {
-                    CopyableTextBox(text: vm.partialTranscript, onDoubleClickCopy: false)
+                    CopyableTextBox(
+                        text: vm.partialTranscript,
+                        selectable: false,
+                        onDoubleClickCopy: false
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

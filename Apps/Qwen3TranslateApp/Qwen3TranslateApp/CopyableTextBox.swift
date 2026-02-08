@@ -8,12 +8,13 @@ import UIKit
 
 struct CopyableTextBox: View {
     let text: String
+    var selectable: Bool = true
     var onDoubleClickCopy: Bool = true
 
     var body: some View {
         Text(text)
             .font(.body)
-            .textSelection(.enabled)
+            .textSelection(selectable ? .enabled : .disabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(
@@ -46,4 +47,3 @@ struct CopyableTextBox: View {
         #endif
     }
 }
-
