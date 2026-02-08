@@ -39,7 +39,7 @@ struct ContentView: View {
         }
         .translationTask(isRunning ? translationConfig : nil) { session in
             // Runs while active; cancelled automatically when `translationConfig` becomes nil.
-            vm.start(
+            await vm.run(
                 translationSession: session,
                 modelId: modelIdDefault,
                 from: from,
@@ -172,4 +172,3 @@ struct ContentView: View {
         )
     }
 }
-

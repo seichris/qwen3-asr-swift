@@ -25,16 +25,19 @@ public extension Qwen3ASRModel {
         let baseStream = await realtimeTranslate(audioSource: audioSource, options: baseOptions)
 
         return AsyncStream { continuation in
-            Task {
+            let task = Task {
                 for await event in baseStream {
+                    if Task.isCancelled { break }
                     continuation.yield(event)
 
                     guard event.kind == .final else { continue }
                     let src = event.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !src.isEmpty else { continue }
 
+                    if Task.isCancelled { break }
                     do {
                         let translated = try await AppleTranslation.translate(src, using: translationSession)
+                        if Task.isCancelled { break }
                         let cleaned = translated.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !cleaned.isEmpty else { continue }
 
@@ -51,8 +54,11 @@ public extension Qwen3ASRModel {
                 }
                 continuation.finish()
             }
+
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
         }
     }
 }
 #endif
-

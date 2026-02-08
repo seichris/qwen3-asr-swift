@@ -27,69 +27,65 @@ final class LiveTranslateViewModel: ObservableObject {
     @Published var segments: [Segment] = []
 
     private var model: Qwen3ASRModel?
-    private var streamTask: Task<Void, Never>?
-    private var lastFinalSegmentId: UUID?
 
     func clear() {
         partialTranscript = ""
         segments.removeAll()
-        lastFinalSegmentId = nil
     }
 
     func stop() {
-        streamTask?.cancel()
-        streamTask = nil
         status = (model == nil) ? .idle : .ready
     }
 
     #if canImport(Translation)
     @available(iOS 18.0, macOS 15.0, *)
-    func start(
+    func run(
         translationSession: TranslationSession,
         modelId: String,
         from: SupportedLanguage,
         to: SupportedLanguage
-    ) {
-        stop()
+    ) async {
         status = .running
 
-        streamTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let model = try await loadModelIfNeeded(modelId: modelId)
+        do {
+            _ = to // currently used only for TranslationSession config in the view
 
-                let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
-                let options = RealtimeTranslationOptions(
-                    targetLanguage: to.modelName,
-                    sourceLanguage: from.modelName,
-                    windowSeconds: 10.0,
-                    stepMs: 500,
-                    enableVAD: true,
-                    enableTranslation: false
-                )
+            let model = try await loadModelIfNeeded(modelId: modelId)
 
-                let stream = await model.realtimeTranslate(
-                    audioSource: audioSource,
-                    options: options,
-                    translationSession: translationSession
-                )
+            let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
+            let options = RealtimeTranslationOptions(
+                targetLanguage: "English",
+                sourceLanguage: from.modelName,
+                windowSeconds: 10.0,
+                stepMs: 500,
+                enableVAD: true,
+                enableTranslation: false
+            )
 
-                for await event in stream {
-                    if Task.isCancelled { break }
-                    handle(event: event)
-                }
+            let stream = await model.realtimeTranslate(
+                audioSource: audioSource,
+                options: options
+            )
 
-                if !Task.isCancelled {
-                    status = .ready
-                }
-            } catch {
+            for await event in stream {
+                if Task.isCancelled { break }
+                await handle(event: event, translationSession: translationSession)
+            }
+
+            if !Task.isCancelled {
+                status = .ready
+            }
+        } catch {
+            if !Task.isCancelled {
                 status = .error(String(describing: error))
             }
         }
     }
     #endif
 
-    private func handle(event: RealtimeTranslationEvent) {
+    #if canImport(Translation)
+    @available(iOS 18.0, macOS 15.0, *)
+    private func handle(event: RealtimeTranslationEvent, translationSession: TranslationSession) async {
         switch event.kind {
         case .partial:
             partialTranscript = event.transcript
@@ -100,19 +96,31 @@ final class LiveTranslateViewModel: ObservableObject {
             guard !cleaned.isEmpty else { return }
 
             let id = UUID()
-            lastFinalSegmentId = id
             segments.append(.init(id: id, transcript: cleaned, translation: nil, date: event.timestamp))
 
-        case .translation:
-            guard let t = event.translation?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return }
-            guard let id = lastFinalSegmentId else { return }
-            guard let idx = segments.lastIndex(where: { $0.id == id }) else { return }
-            segments[idx].translation = t
+            if Task.isCancelled { return }
+            do {
+                let translated = try await AppleTranslation.translate(cleaned, using: translationSession)
+                if Task.isCancelled { return }
+                let t = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty else { return }
+                guard let idx = segments.lastIndex(where: { $0.id == id }) else { return }
+                segments[idx].translation = t
+            } catch {
+                // Best-effort: keep transcription running if translation fails/cancels.
+                return
+            }
 
         case .metrics:
             break
+
+        case .translation:
+            // Not used in the app path; translation is computed here to keep TranslationSession scoped
+            // to the `.translationTask` lifecycle.
+            break
         }
     }
+    #endif
 
     private func loadModelIfNeeded(modelId: String) async throws -> Qwen3ASRModel {
         if let model { return model }
@@ -129,4 +137,3 @@ final class LiveTranslateViewModel: ObservableObject {
         return loaded
     }
 }
-
