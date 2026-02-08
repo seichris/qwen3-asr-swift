@@ -122,6 +122,14 @@ struct ContentView: View {
 }
 ```
 
+### Demo App (iPhone + Mac)
+
+This repo includes a SwiftUI demo app with language pickers and a mic button:
+
+- Project: `Apps/Qwen3TranslateApp/Qwen3TranslateApp.xcodeproj`
+- Runs on iPhone (iOS) and Mac (macOS)
+- Requires iOS 18.0+ / macOS 15.0+ (Apple Translation)
+
 ## Usage
 
 ### Basic Transcription
