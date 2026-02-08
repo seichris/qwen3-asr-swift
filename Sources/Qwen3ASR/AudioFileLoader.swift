@@ -40,11 +40,6 @@ public enum AudioFileLoader {
             throw AudioLoadError.invalidWAVFile
         }
 
-        // Basic bounds sanity for fixed-offset fields used below.
-        guard data.count >= 36 else {
-            throw AudioLoadError.invalidWAVFile
-        }
-
         // Check RIFF header
         let riff = String(data: data[0..<4], encoding: .ascii)
         guard riff == "RIFF" else {
@@ -89,10 +84,10 @@ public enum AudioFileLoader {
             }
 
             // Validate chunk advance to avoid integer overflow and out-of-bounds.
-            if chunkSize > UInt32(Int.max) {
+            guard let chunkSizeInt = Int(exactly: chunkSize) else {
                 throw AudioLoadError.invalidWAVFile
             }
-            let nextOffset = dataOffset + 8 + Int(chunkSize)
+            let nextOffset = dataOffset + 8 + chunkSizeInt
             guard nextOffset >= dataOffset, nextOffset <= data.count else {
                 throw AudioLoadError.invalidWAVFile
             }
@@ -103,10 +98,9 @@ public enum AudioFileLoader {
         guard let chunkSize = dataChunkSize else {
             throw AudioLoadError.invalidWAVFile
         }
-        if chunkSize > UInt32(Int.max) {
+        guard let chunkSizeInt = Int(exactly: chunkSize) else {
             throw AudioLoadError.invalidWAVFile
         }
-        let chunkSizeInt = Int(chunkSize)
         guard dataOffset >= 0, dataOffset <= data.count, dataOffset + chunkSizeInt <= data.count else {
             throw AudioLoadError.invalidWAVFile
         }
