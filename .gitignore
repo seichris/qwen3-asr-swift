@@ -2,6 +2,7 @@
 .swiftpm/
 Package.resolved
 DerivedData/
-*.xcodeproj/project.xcworkspace/
-*.xcodeproj/xcuserdata/
+**/.DS_Store
+**/*.xcodeproj/project.xcworkspace/
+**/*.xcodeproj/xcuserdata/
 AGENTS.md

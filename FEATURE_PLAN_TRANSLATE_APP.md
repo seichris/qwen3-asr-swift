@@ -4,7 +4,7 @@
 
 Build a SwiftUI app that runs on:
 - iPhone (iOS)
-- Mac (via Mac Catalyst)
+- Mac (native macOS target, not Catalyst)
 
 The app provides realtime transcription + translation with a UI similar to Google Translate / Apple Translate:
 - Choose source language (ASR hint)
@@ -70,8 +70,8 @@ Notes:
 ## Project Setup
 
 - Add `Apps/Qwen3TranslateApp/` Xcode project:
-  - iOS app target with **Mac Catalyst enabled**
-  - Deployment: iOS 18.0
+  - iOS app target (deployment: iOS 18.0)
+  - macOS app target (deployment: macOS 15.0)
   - Depends on local Swift package product `Qwen3ASR`
 - Provide `Info.plist` with `NSMicrophoneUsageDescription`.
 
@@ -95,6 +95,5 @@ Notes:
 ## Acceptance Criteria
 
 - On iPhone: mic capture works, transcript updates live, final segments translate to English by default.
-- On Mac (Catalyst): same behavior; prompts for mic permission.
+- On Mac (macOS): same behavior; prompts for mic permission.
 - Language pickers work; changing languages restarts translation session and stream cleanly.
-
