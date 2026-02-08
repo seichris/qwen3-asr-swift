@@ -36,6 +36,24 @@ dependencies: [
 - Apple Silicon (M1/M2/M3/M4)
 - Xcode 15+
 
+### CLI Quickstart (macOS)
+
+If you want to run the included CLI locally:
+
+```bash
+# One-time: install Metal toolchain (needed to build mlx.metallib)
+xcodebuild -downloadComponent MetalToolchain
+
+# Build the CLI
+swift build -c release --disable-sandbox
+
+# Build MLX Metal shader library next to the binary
+./scripts/build_mlx_metallib.sh release
+
+# Run
+.build/release/qwen3-asr-cli Tests/Qwen3ASRTests/Resources/test_audio.wav
+```
+
 ## Usage
 
 ### Basic Transcription
