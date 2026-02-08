@@ -1,5 +1,6 @@
 import Foundation
 import Qwen3ASR
+import os
 
 #if canImport(Translation)
 import Translation
@@ -7,6 +8,8 @@ import Translation
 
 @MainActor
 final class LiveTranslateViewModel: ObservableObject {
+    private let log = Logger(subsystem: "Qwen3TranslateApp", category: "LiveTranslate")
+
     enum Status: Equatable {
         case idle
         case loadingModel(progress: Double, status: String)
@@ -27,6 +30,8 @@ final class LiveTranslateViewModel: ObservableObject {
     @Published var segments: [Segment] = []
 
     private var model: Qwen3ASRModel?
+    private var activeAudioSource: MicrophoneAudioSource?
+    private var activeRunID: UUID?
 
     func clear() {
         partialTranscript = ""
@@ -34,6 +39,15 @@ final class LiveTranslateViewModel: ObservableObject {
     }
 
     func stop() {
+        let runID = activeRunID
+        log.info("stop() requested. activeRunID=\(String(describing: runID))")
+        activeRunID = nil
+        if let src = activeAudioSource {
+            Task {
+                await src.stop()
+            }
+        }
+        activeAudioSource = nil
         status = (model == nil) ? .idle : .ready
     }
 
@@ -45,14 +59,17 @@ final class LiveTranslateViewModel: ObservableObject {
         from: SupportedLanguage,
         to: SupportedLanguage
     ) async {
+        let runID = UUID()
+        activeRunID = runID
         status = .running
 
         do {
-            _ = to // currently used only for TranslationSession config in the view
+            log.info("run() start. runID=\(runID.uuidString) from=\(from.displayName, privacy: .public) to=\(to.displayName, privacy: .public)")
 
             let model = try await loadModelIfNeeded(modelId: modelId)
 
             let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
+            activeAudioSource = audioSource
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
                 sourceLanguage: from.modelName,
@@ -69,14 +86,21 @@ final class LiveTranslateViewModel: ObservableObject {
 
             for await event in stream {
                 if Task.isCancelled { break }
+                if activeRunID != runID { break }
                 await handle(event: event, translationSession: translationSession)
             }
 
             if !Task.isCancelled {
+                if activeRunID == runID {
+                    activeRunID = nil
+                    activeAudioSource = nil
+                }
+                log.info("run() finished. runID=\(runID.uuidString)")
                 status = .ready
             }
         } catch {
             if !Task.isCancelled {
+                log.error("run() error. runID=\(runID.uuidString) error=\(String(describing: error), privacy: .public)")
                 status = .error(String(describing: error))
             }
         }
@@ -108,11 +132,15 @@ final class LiveTranslateViewModel: ObservableObject {
                 segments[idx].translation = t
             } catch {
                 // Best-effort: keep transcription running if translation fails/cancels.
+                log.debug("translation failed (ignored): \(String(describing: error), privacy: .public)")
                 return
             }
 
         case .metrics:
-            break
+            if let err = event.metadata?["error"], !err.isEmpty {
+                log.error("metrics error: \(err, privacy: .public)")
+                status = .error(err)
+            }
 
         case .translation:
             // Not used in the app path; translation is computed here to keep TranslationSession scoped
