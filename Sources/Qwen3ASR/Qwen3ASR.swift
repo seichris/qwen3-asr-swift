@@ -1,5 +1,8 @@
 import Foundation
 import Dispatch
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 import MLX
 import MLXNN
 import MLXFast
@@ -181,6 +184,16 @@ public class Qwen3ASRModel {
             return !(raw == "1" || raw == "true" || raw == "yes" || raw == "on")
         }()
 
+        let debugTopK: Int = {
+            let raw = env["QWEN3_ASR_DEBUG_TOPK"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard let raw, !raw.isEmpty else { return 0 }
+            if raw == "1" || raw == "true" || raw == "yes" || raw == "on" { return 8 }
+            if let n = Int(raw), n > 0 { return min(n, 50) }
+            return 0
+        }()
+
         // Qwen3-ASR prompt format (from mlx-audio implementation):
         // <|im_start|>system\n<|im_end|>\n
         // <|im_start|>user\n<|audio_start|><|audio_pad|>...<|audio_end|><|im_end|>\n
@@ -338,6 +351,40 @@ public class Qwen3ASRModel {
             Qwen3ASRDebug.log("Input embeds shape: \(inputEmbeds.shape), hidden states shape: \(hiddenStates.shape)")
         }
 
+        if Qwen3ASRDebug.enabled, debugTopK > 0, let tokenizer = tokenizer {
+            // Debugging helper: show what the model thinks the top candidates are at step 0.
+            // This helps distinguish "bad audio embeddings/prompt" vs "bad sampling".
+            let flat = logits.squeezed().asArray(Float.self)
+            var best: [(idx: Int, value: Float)] = []
+            best.reserveCapacity(debugTopK)
+            for (i, v) in flat.enumerated() {
+                if best.count < debugTopK {
+                    best.append((i, v))
+                    if best.count == debugTopK {
+                        best.sort { $0.value > $1.value }
+                    }
+                    continue
+                }
+                if v <= best[debugTopK - 1].value { continue }
+                best[debugTopK - 1] = (i, v)
+                var j = debugTopK - 1
+                while j > 0 && best[j].value > best[j - 1].value {
+                    best.swapAt(j, j - 1)
+                    j -= 1
+                }
+            }
+
+            Qwen3ASRDebug.log("Top-\(debugTopK) tokens @ step0:")
+            for (rank, entry) in best.enumerated() {
+                let id = entry.idx
+                let rawTok = tokenizer.getToken(for: id) ?? "<?>"
+                // Single-token decode is imperfect (Tokenizer trims); still useful for spotting obvious junk.
+                let decoded = tokenizer.decode(tokens: [id])
+                let valStr = String(format: "%.4f", entry.value)
+                Qwen3ASRDebug.log("  #\(rank + 1): id=\(id) logit=\(valStr) raw='\(rawTok)' decoded='\(decoded)'")
+            }
+        }
+
         let streamTokens: Bool = {
             let raw = env["QWEN3_ASR_DEBUG_STREAM_TOKENS"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -431,6 +478,10 @@ public extension Qwen3ASRModel {
             })
         }
 
+        if Qwen3ASRDebug.enabled {
+            _debugLogCachedArtifacts(cacheDir: cacheDir)
+        }
+
         progressHandler?(0.5, "Loading tokenizer...")
 
         // Create model with default config
@@ -479,6 +530,61 @@ public extension Qwen3ASRModel {
         progressHandler?(1.0, "Ready")
 
         return model
+    }
+
+    private static func _debugLogCachedArtifacts(cacheDir: URL) {
+        let env = ProcessInfo.processInfo.environment
+        let wantHashes: Bool = {
+            let raw = env["QWEN3_ASR_DEBUG_FILE_HASH"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+        }()
+        let wantModelHash: Bool = {
+            let raw = env["QWEN3_ASR_DEBUG_MODEL_HASH"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+        }()
+
+        let files = [
+            "config.json",
+            "vocab.json",
+            "tokenizer_config.json",
+            "model.safetensors",
+        ]
+
+        for name in files {
+            let url = cacheDir.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? -1
+            Qwen3ASRDebug.log("Cache artifact: \(name) size=\(size) bytes")
+
+            guard wantHashes else { continue }
+            if name == "model.safetensors" && !wantModelHash { continue }
+            if let sha = _sha256Hex(url: url) {
+                Qwen3ASRDebug.log("Cache artifact: \(name) sha256=\(sha)")
+            } else {
+                Qwen3ASRDebug.log("Cache artifact: \(name) sha256=<unavailable>")
+            }
+        }
+    }
+
+    private static func _sha256Hex(url: URL) -> String? {
+        #if canImport(CryptoKit)
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? fh.close() }
+
+        var hasher = SHA256()
+        while true {
+            guard let data = try? fh.read(upToCount: 1024 * 1024), !data.isEmpty else {
+                break
+            }
+            hasher.update(data: data)
+        }
+
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
+        #else
+        return nil
+        #endif
     }
 
     private static func runBlocking(_ work: @escaping () throws -> Void) async throws {
