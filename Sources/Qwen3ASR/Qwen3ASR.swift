@@ -446,6 +446,14 @@ public extension Qwen3ASRModel {
             }
         }
 
+        #if os(iOS)
+        // Optional diagnostics to validate quantized kernels on device.
+        // Enable with `QWEN3_ASR_DIAGNOSTICS=1` in the host app scheme.
+        _ = Device.withDefaultDevice(.gpu) {
+            Qwen3ASRDiagnostics.runQuantizedMMSanityCheck()
+        }
+        #endif
+
         progressHandler?(1.0, "Ready")
 
         return model
