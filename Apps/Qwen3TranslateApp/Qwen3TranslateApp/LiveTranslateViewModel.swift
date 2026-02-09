@@ -132,6 +132,77 @@ final class LiveTranslateViewModel: ObservableObject {
         }
     }
 
+    @available(iOS 18.0, macOS 15.0, *)
+    func runGoogleTranslation(modelId: String, from: SupportedLanguage, to: SupportedLanguage) async {
+        status = .running
+
+        do {
+            if stopRequested {
+                isStopping = false
+                isRunning = false
+                status = (model == nil) ? .idle : .ready
+                return
+            }
+
+            guard let apiKey = ProcessInfo.processInfo.environment["QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY"],
+                  !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw MissingGoogleAPIKeyError()
+            }
+
+            log.info("runGoogleTranslation() start. from=\(from.displayName, privacy: .public) to=\(to.displayName, privacy: .public)")
+
+            let model = try await loadModelIfNeeded(modelId: modelId)
+
+            let audioSource = MicrophoneAudioSource(frameSizeMs: 20)
+            activeAudioSource = audioSource
+            defer {
+                activeAudioSource = nil
+                isStopping = false
+                isRunning = false
+                if case .running = status {
+                    status = (self.model == nil) ? .idle : .ready
+                }
+            }
+
+            let options = RealtimeTranslationOptions(
+                targetLanguage: "English",
+                sourceLanguage: from.modelName,
+                windowSeconds: 10.0,
+                stepMs: 500,
+                enableVAD: true,
+                enableTranslation: false
+            )
+
+            let stream = await model.realtimeTranslate(
+                audioSource: audioSource,
+                options: options
+            )
+
+            for await event in stream {
+                if Task.isCancelled { break }
+                if stopRequested { break }
+                await handleGoogle(event: event, apiKey: apiKey, from: from, to: to)
+            }
+
+            if !Task.isCancelled {
+                activeAudioSource = nil
+                isStopping = false
+                isRunning = false
+                status = .ready
+                log.info("runGoogleTranslation() finished")
+            }
+        } catch {
+            if !Task.isCancelled {
+                log.error("runGoogleTranslation() error. error=\(String(describing: error), privacy: .public)")
+                activeAudioSource = nil
+                isStopping = false
+                isRunning = false
+                status = .error(String(describing: error))
+            }
+        }
+    }
+
     #if canImport(Translation)
     @available(iOS 18.0, macOS 15.0, *)
     func run(
@@ -227,6 +298,59 @@ final class LiveTranslateViewModel: ObservableObject {
         }
     }
 
+    @available(iOS 18.0, macOS 15.0, *)
+    private func handleGoogle(
+        event: RealtimeTranslationEvent,
+        apiKey: String,
+        from: SupportedLanguage,
+        to: SupportedLanguage
+    ) async {
+        switch event.kind {
+        case .partial:
+            partialTranscript = event.transcript
+
+        case .final:
+            partialTranscript = ""
+            let cleaned = event.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { return }
+
+            let id = UUID()
+            segments.append(.init(id: id, transcript: cleaned, translation: nil, date: event.timestamp))
+
+            if stopRequested { return }
+            if Task.isCancelled { return }
+
+            do {
+                let translated = try await translateGoogleWithTimeout(
+                    cleaned,
+                    apiKey: apiKey,
+                    sourceLanguage: from.id,
+                    targetLanguage: to.id,
+                    timeoutSeconds: 1.2
+                )
+                if Task.isCancelled { return }
+                if stopRequested { return }
+                let t = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty else { return }
+                guard let idx = segments.lastIndex(where: { $0.id == id }) else { return }
+                segments[idx].translation = t
+            } catch {
+                // Best-effort: keep transcription running if translation fails/cancels.
+                log.debug("google translation failed (ignored): \(String(describing: error), privacy: .public)")
+                return
+            }
+
+        case .metrics:
+            if let err = event.metadata?["error"], !err.isEmpty {
+                log.error("metrics error: \(err, privacy: .public)")
+                status = .error(err)
+            }
+
+        case .translation:
+            break
+        }
+    }
+
     #if canImport(Translation)
     @available(iOS 18.0, macOS 15.0, *)
     private func handle(event: RealtimeTranslationEvent, translationSession: TranslationSession) async {
@@ -299,6 +423,40 @@ final class LiveTranslateViewModel: ObservableObject {
         }
     }
     #endif
+
+    @available(iOS 18.0, macOS 15.0, *)
+    private func translateGoogleWithTimeout(
+        _ text: String,
+        apiKey: String,
+        sourceLanguage: String?,
+        targetLanguage: String,
+        timeoutSeconds: Double
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await GoogleCloudTranslation.translate(
+                    text,
+                    apiKey: apiKey,
+                    sourceLanguage: sourceLanguage,
+                    targetLanguage: targetLanguage
+                )
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000.0))
+                return ""
+            }
+
+            let first = try await group.next() ?? ""
+            group.cancelAll()
+            return first
+        }
+    }
+
+    private struct MissingGoogleAPIKeyError: LocalizedError {
+        var errorDescription: String? {
+            "Missing Google API key. Set QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY in the app environment."
+        }
+    }
 
     private func loadModelIfNeeded(modelId: String) async throws -> Qwen3ASRModel {
         if let model { return model }

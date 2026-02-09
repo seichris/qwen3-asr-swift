@@ -52,6 +52,10 @@ struct SettingsView: View {
                     Text("The app downloads model weights (`*.safetensors`) from Hugging Face and caches them in the app’s Caches directory. Tokenizer/config files are small; weights are the large part.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+
+                    Text("If you use Google Cloud translation, set QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY in the app's environment (Xcode scheme) so the app can call the Translation API.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Settings")
