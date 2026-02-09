@@ -31,6 +31,78 @@ private actor RealtimeEventPrinter {
     }
 }
 
+private actor GoogleTranslationThrottler {
+    private let printer: RealtimeEventPrinter
+    private let apiKey: String
+    private let sourceLanguage: String?
+    private let targetLanguage: String
+
+    private var inFlight: Bool = false
+    private var pendingText: String? = nil
+
+    init(
+        printer: RealtimeEventPrinter,
+        apiKey: String,
+        sourceLanguage: String?,
+        targetLanguage: String
+    ) {
+        self.printer = printer
+        self.apiKey = apiKey
+        self.sourceLanguage = sourceLanguage
+        self.targetLanguage = targetLanguage
+    }
+
+    func submit(_ text: String) {
+        if inFlight {
+            // If translation can't keep up, keep only the latest segment.
+            pendingText = text
+            return
+        }
+        inFlight = true
+
+        let apiKey = self.apiKey
+        let sourceLanguage = self.sourceLanguage
+        let targetLanguage = self.targetLanguage
+
+        Task(priority: .utility) { [weak self] in
+            do {
+                let translated = try await GoogleCloudTranslation.translate(
+                    text,
+                    apiKey: apiKey,
+                    sourceLanguage: sourceLanguage,
+                    targetLanguage: targetLanguage
+                )
+                let cleaned = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleaned.isEmpty {
+                    await self?.printer.emit(.init(
+                        kind: .translation,
+                        transcript: text,
+                        translation: cleaned,
+                        isStable: true
+                    ))
+                }
+            } catch {
+                await self?.printer.emit(.init(
+                    kind: .metrics,
+                    transcript: "",
+                    translation: nil,
+                    isStable: true,
+                    metadata: ["error": "Google translation failed: \(String(describing: error))"]
+                ))
+            }
+            await self?.finish()
+        }
+    }
+
+    private func finish() {
+        inFlight = false
+        if let next = pendingText {
+            pendingText = nil
+            submit(next)
+        }
+    }
+}
+
 private func runRealtime(
     targetLanguage: String,
     sourceLanguage: String?,
@@ -75,6 +147,16 @@ private func runRealtime(
 
     let printer = RealtimeEventPrinter(format: format)
 
+    #if DEBUG
+    await printer.emit(.init(
+        kind: .metrics,
+        transcript: "",
+        translation: nil,
+        isStable: true,
+        metadata: ["note": "Debug build is slower and can hurt realtime ASR accuracy. Prefer `swift run -c release qwen3-asr-cli ...` or `.build/release/qwen3-asr-cli ...`."]
+    ))
+    #endif
+
     let options = RealtimeTranslationOptions(
         targetLanguage: normalizedTo,
         sourceLanguage: normalizedFrom,
@@ -90,6 +172,20 @@ private func runRealtime(
         options: options
     )
 
+    let googleTranslator: GoogleTranslationThrottler? = {
+        guard enableTranslation, provider == .google else { return nil }
+        guard let apiKey = env["QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY"],
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        return GoogleTranslationThrottler(
+            printer: printer,
+            apiKey: apiKey,
+            sourceLanguage: googleFrom,
+            targetLanguage: googleTo
+        )
+    }()
+
     for await event in stream {
         await printer.emit(event)
 
@@ -99,9 +195,7 @@ private func runRealtime(
         let src = event.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !src.isEmpty else { continue }
 
-        guard let apiKey = env["QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY"],
-              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
+        guard let googleTranslator else {
             await printer.emit(.init(
                 kind: .metrics,
                 transcript: "",
@@ -112,33 +206,7 @@ private func runRealtime(
             continue
         }
 
-        // Translate asynchronously so we keep printing partials smoothly.
-        Task {
-            do {
-                let translated = try await GoogleCloudTranslation.translate(
-                    src,
-                    apiKey: apiKey,
-                    sourceLanguage: googleFrom,
-                    targetLanguage: googleTo
-                )
-                let cleaned = translated.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !cleaned.isEmpty else { return }
-                await printer.emit(.init(
-                    kind: .translation,
-                    transcript: src,
-                    translation: cleaned,
-                    isStable: true
-                ))
-            } catch {
-                await printer.emit(.init(
-                    kind: .metrics,
-                    transcript: "",
-                    translation: nil,
-                    isStable: true,
-                    metadata: ["error": "Google translation failed: \(String(describing: error))"]
-                ))
-            }
-        }
+        await googleTranslator.submit(src)
     }
 }
 

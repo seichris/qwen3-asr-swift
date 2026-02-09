@@ -6,3 +6,6 @@ DerivedData/
 **/*.xcodeproj/project.xcworkspace/
 **/*.xcodeproj/xcuserdata/
 AGENTS.md
+
+# Avoid committing shared Xcode schemes; they can easily embed env vars/secrets.
+Apps/Qwen3TranslateApp/Qwen3TranslateApp.xcodeproj/xcshareddata/xcschemes/*.xcscheme
