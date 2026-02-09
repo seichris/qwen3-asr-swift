@@ -6,6 +6,20 @@ import MLXNN
 /// Uses direct HuggingFace key paths - model structure must match exactly
 public enum WeightLoader {
 
+    #if os(iOS)
+    /// iOS Metal kernels are less forgiving about bfloat16 quantization parameters.
+    /// Casting scales/biases to float16 is a pragmatic compatibility fix for A-series GPUs.
+    private static func castQuantParamForiOS(_ array: MLXArray, name: String) -> MLXArray {
+        guard array.dtype == .bfloat16 else { return array }
+        Qwen3ASRDebug.log("WeightLoader: casting \(name) bfloat16 -> float16 (iOS)")
+        return array.asType(.float16)
+    }
+    #else
+    private static func castQuantParamForiOS(_ array: MLXArray, name: String) -> MLXArray {
+        array
+    }
+    #endif
+
     /// Load weights from safetensors file
     public static func loadSafetensors(url: URL) throws -> [String: MLXArray] {
         try MLX.loadArrays(url: url)
@@ -139,10 +153,10 @@ public enum WeightLoader {
             params["weight"] = .value(weight)
         }
         if let scales = weights["\(prefix).scales"] {
-            params["scales"] = .value(scales)
+            params["scales"] = .value(castQuantParamForiOS(scales, name: "\(prefix).scales"))
         }
         if let biases = weights["\(prefix).biases"] {
-            params["biases"] = .value(biases)
+            params["biases"] = .value(castQuantParamForiOS(biases, name: "\(prefix).biases"))
         }
 
         if !params.isEmpty {
@@ -161,10 +175,10 @@ public enum WeightLoader {
             params["weight"] = .value(weight)
         }
         if let scales = weights["\(prefix).scales"] {
-            params["scales"] = .value(scales)
+            params["scales"] = .value(castQuantParamForiOS(scales, name: "\(prefix).scales"))
         }
         if let biases = weights["\(prefix).biases"] {
-            params["biases"] = .value(biases)
+            params["biases"] = .value(castQuantParamForiOS(biases, name: "\(prefix).biases"))
         }
 
         if !params.isEmpty {
