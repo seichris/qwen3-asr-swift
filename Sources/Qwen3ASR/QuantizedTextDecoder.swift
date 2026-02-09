@@ -44,9 +44,18 @@ public class PreQuantizedEmbedding: Module {
 
     /// For use as LM head (matmul with transposed weight)
     public func asLinear(_ x: MLXArray) -> MLXArray {
-        quantizedMatmul(
-            x, weight, scales: scales, biases: biases, transpose: true,
-            groupSize: groupSize, bits: bits)
+        // Use quantizedMM (the current API) instead of the deprecated quantizedMatmul.
+        // This matters on iOS where older kernels can behave incorrectly on some GPUs.
+        quantizedMM(
+            x,
+            weight,
+            scales: scales,
+            biases: biases,
+            transpose: true,
+            groupSize: groupSize,
+            bits: bits,
+            mode: .affine
+        )
     }
 }
 

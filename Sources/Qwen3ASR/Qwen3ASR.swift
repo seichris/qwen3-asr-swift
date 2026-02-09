@@ -63,11 +63,13 @@ public class Qwen3ASRModel {
         let env = ProcessInfo.processInfo.environment
         let rawDevice = env["QWEN3_ASR_DEVICE"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        // iOS Metal backend support varies by device/OS; default to CPU for correctness unless
-        // explicitly forced to GPU via `QWEN3_ASR_DEVICE=gpu`.
+        // MLX CPU backend is not available on iOS. Default to GPU; allow forcing CPU on macOS/CLI.
         let device: Device = {
             #if os(iOS)
-            return (rawDevice == "gpu") ? .gpu : .cpu
+            if rawDevice == "cpu" {
+                Qwen3ASRDebug.log("QWEN3_ASR_DEVICE=cpu requested on iOS, but MLX CPU backend is not supported; using GPU.")
+            }
+            return .gpu
             #else
             return (rawDevice == "cpu") ? .cpu : .gpu
             #endif
