@@ -30,6 +30,9 @@ final class LiveTranslateViewModel: ObservableObject {
     @Published var segments: [Segment] = []
     @Published var isRunning: Bool = false
     @Published var isStopping: Bool = false
+    @Published var debugFileTranscript: String = ""
+    @Published var debugFileInfo: String = ""
+    @Published var debugIsTranscribingFile: Bool = false
 
     private var model: Qwen3ASRModel?
     private var activeAudioSource: MicrophoneAudioSource?
@@ -44,6 +47,41 @@ final class LiveTranslateViewModel: ObservableObject {
         model = nil
         if !isRunning {
             status = .idle
+        }
+    }
+
+    func transcribeAudioFile(modelId: String, from: SupportedLanguage, url: URL) async {
+        // This is meant as a "first principles" debugging path: single-shot file transcription,
+        // closest to the CLI `transcribe` command, bypassing microphone capture, VAD, and stabilizer.
+        debugIsTranscribingFile = true
+        debugFileTranscript = ""
+        debugFileInfo = url.lastPathComponent
+        defer { debugIsTranscribingFile = false }
+
+        do {
+            let model = try await loadModelIfNeeded(modelId: modelId)
+            let raw = await Task(priority: .userInitiated) {
+                autoreleasepool {
+                    do {
+                        let samples = try AudioFileLoader.load(url: url, targetSampleRate: 24000)
+                        let text = model.transcribe(
+                            audio: samples,
+                            sampleRate: 24000,
+                            language: from.modelName,
+                            maxTokens: 448
+                        )
+                        return (samples.count, text)
+                    } catch {
+                        return (0, "Error: \(String(describing: error))")
+                    }
+                }
+            }.value
+
+            let (nSamples, rawText) = raw
+            debugFileInfo = "\(url.lastPathComponent) (\(nSamples) samples @ 24kHz)"
+            debugFileTranscript = extractASRText(from: rawText)
+        } catch {
+            debugFileTranscript = "Error: \(String(describing: error))"
         }
     }
 
@@ -94,13 +132,8 @@ final class LiveTranslateViewModel: ObservableObject {
                 }
             }
 
-            #if os(iOS)
-            let windowSeconds = 15.0
-            let stepMs = 1000
-            #else
             let windowSeconds = 10.0
             let stepMs = 500
-            #endif
 
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
@@ -173,13 +206,8 @@ final class LiveTranslateViewModel: ObservableObject {
                 }
             }
 
-            #if os(iOS)
-            let windowSeconds = 15.0
-            let stepMs = 1000
-            #else
             let windowSeconds = 10.0
             let stepMs = 500
-            #endif
 
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
@@ -252,13 +280,8 @@ final class LiveTranslateViewModel: ObservableObject {
                     status = (self.model == nil) ? .idle : .ready
                 }
             }
-            #if os(iOS)
-            let windowSeconds = 15.0
-            let stepMs = 1000
-            #else
             let windowSeconds = 10.0
             let stepMs = 500
-            #endif
 
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
@@ -479,6 +502,13 @@ final class LiveTranslateViewModel: ObservableObject {
         var errorDescription: String? {
             "Missing Google API key. Set QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY in the app environment."
         }
+    }
+
+    private func extractASRText(from raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        guard let range = trimmed.range(of: "<asr_text>") else { return trimmed }
+        return String(trimmed[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func loadModelIfNeeded(modelId: String) async throws -> Qwen3ASRModel {

@@ -1,10 +1,12 @@
 import SwiftUI
 import Qwen3ASR
+import UniformTypeIdentifiers
 
 @available(iOS 18.0, macOS 15.0, *)
 struct SettingsView: View {
     @ObservedObject var vm: LiveTranslateViewModel
     let modelId: String
+    let from: SupportedLanguage
 
     @Environment(\.dismiss) private var dismiss
 
@@ -13,6 +15,7 @@ struct SettingsView: View {
     @State private var isDeleting: Bool = false
     @State private var showDeleteConfirm: Bool = false
     @State private var errorMessage: String?
+    @State private var showFileImporter: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -48,6 +51,41 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Diagnostics") {
+                    Button {
+                        showFileImporter = true
+                    } label: {
+                        Text("Transcribe Audio File…")
+                    }
+                    .disabled(vm.isRunning || vm.debugIsTranscribingFile)
+
+                    if vm.debugIsTranscribingFile {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Transcribing…")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if !vm.debugFileInfo.isEmpty {
+                        Text(vm.debugFileInfo)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+
+                    if !vm.debugFileTranscript.isEmpty {
+                        Text(vm.debugFileTranscript)
+                            .textSelection(.enabled)
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    Text("This is the simplest ASR path (closest to the CLI): load an audio file, run one transcription, and show the raw ASR text. It bypasses realtime microphone capture, VAD, and transcript stabilization.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("About") {
                     Text("The app downloads model weights (`*.safetensors`) from Hugging Face and caches them in the app’s Caches directory. Tokenizer/config files are small; weights are the large part.")
                         .font(.footnote)
@@ -67,6 +105,24 @@ struct SettingsView: View {
                 #endif
             }
             .task { await refreshCacheSize() }
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.audio],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    Task { @MainActor in
+                        // Best-effort: handle security-scoped URLs (iOS Files).
+                        let ok = url.startAccessingSecurityScopedResource()
+                        defer { if ok { url.stopAccessingSecurityScopedResource() } }
+                        await vm.transcribeAudioFile(modelId: modelId, from: from, url: url)
+                    }
+                case .failure(let error):
+                    errorMessage = String(describing: error)
+                }
+            }
             .alert("Delete Downloads?", isPresented: $showDeleteConfirm) {
                 Button("Cancel", role: .cancel) {}
                 Button("Delete", role: .destructive) {

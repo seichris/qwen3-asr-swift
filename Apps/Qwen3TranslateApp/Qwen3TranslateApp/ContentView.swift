@@ -73,7 +73,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView(vm: vm, modelId: modelIdDefault)
+            SettingsView(vm: vm, modelId: modelIdDefault, from: from)
         }
         .onChange(of: from) { _, _ in
             rebuildTranslationConfig()
