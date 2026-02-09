@@ -27,6 +27,8 @@ public actor MicrophoneAudioSource: AudioFrameSource {
     private var isRunning = false
     private var pendingSamples: [Float] = []
     private var pendingStartIndex: Int = 0
+    private var loggedInputFormat = false
+    private var loggedFallback = false
     
     public init(frameSizeMs: Double = 20.0, bufferedFrames: Int = 500) {
         // Calculate frame size: sampleRate * frameSizeMs / 1000
@@ -65,6 +67,15 @@ public actor MicrophoneAudioSource: AudioFrameSource {
         )!
         self.outputFormat = outputFormat
         self.converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+        if self.converter == nil {
+            throw RealtimeError.microphoneSetupFailed("AVAudioConverter init failed. input=\(inputFormat)")
+        }
+
+        if Qwen3ASRDebug.enabled, !loggedInputFormat {
+            loggedInputFormat = true
+            Qwen3ASRDebug.log("MicrophoneAudioSource: inputFormat sr=\(inputFormat.sampleRate) ch=\(inputFormat.channelCount) fmt=\(inputFormat.commonFormat)")
+            Qwen3ASRDebug.log("MicrophoneAudioSource: outputFormat sr=\(outputFormat.sampleRate) ch=\(outputFormat.channelCount) fmt=\(outputFormat.commonFormat)")
+        }
 
         // Capture conversion objects for the tap callback without touching actor state from that thread.
         let converter = self.converter
@@ -107,6 +118,12 @@ public actor MicrophoneAudioSource: AudioFrameSource {
                 let n = Int(out.frameLength)
                 samples = Array(UnsafeBufferPointer(start: channelData, count: n))
             } else {
+                if Qwen3ASRDebug.enabled {
+                    Task { [weak self] in
+                        await self?.noteFallback(inputFormat: buffer.format)
+                    }
+                }
+
                 // Fallback: best-effort float32 extraction without resampling/downmix.
                 guard let channelData = buffer.floatChannelData?[0] else { return }
                 let n = Int(buffer.frameLength)
@@ -127,6 +144,12 @@ public actor MicrophoneAudioSource: AudioFrameSource {
         } catch {
             throw RealtimeError.microphoneSetupFailed(error.localizedDescription)
         }
+    }
+
+    private func noteFallback(inputFormat: AVAudioFormat) {
+        guard !loggedFallback else { return }
+        loggedFallback = true
+        Qwen3ASRDebug.log("MicrophoneAudioSource: fell back to raw float extraction (no resample/downmix). inputFormat sr=\(inputFormat.sampleRate) ch=\(inputFormat.channelCount) fmt=\(inputFormat.commonFormat)")
     }
     
     public func stop() async {
@@ -189,10 +212,23 @@ public actor MicrophoneAudioSource: AudioFrameSource {
         }
 
         do {
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
+            var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker]
+            let allowBluetooth = ProcessInfo.processInfo.environment["QWEN3_ASR_ALLOW_BLUETOOTH"] == "1"
+            if allowBluetooth {
+                options.insert(.allowBluetooth)
+            }
+
+            try session.setCategory(.playAndRecord, mode: .measurement, options: options)
             try session.setPreferredSampleRate(Double(sampleRate))
             try session.setPreferredIOBufferDuration(0.02) // ~20ms
             try session.setActive(true)
+
+            if Qwen3ASRDebug.enabled {
+                let route = session.currentRoute
+                let inputs = route.inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
+                let outputs = route.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
+                Qwen3ASRDebug.log("MicrophoneAudioSource: route inputs=[\(inputs)] outputs=[\(outputs)] sr=\(session.sampleRate)")
+            }
         } catch {
             throw RealtimeError.microphoneSetupFailed("AVAudioSession setup failed: \(error)")
         }

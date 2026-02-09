@@ -94,11 +94,19 @@ final class LiveTranslateViewModel: ObservableObject {
                 }
             }
 
+            #if os(iOS)
+            let windowSeconds = 15.0
+            let stepMs = 1000
+            #else
+            let windowSeconds = 10.0
+            let stepMs = 500
+            #endif
+
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
                 sourceLanguage: from.modelName,
-                windowSeconds: 10.0,
-                stepMs: 500,
+                windowSeconds: windowSeconds,
+                stepMs: stepMs,
                 enableVAD: true,
                 enableTranslation: false
             )
@@ -165,11 +173,19 @@ final class LiveTranslateViewModel: ObservableObject {
                 }
             }
 
+            #if os(iOS)
+            let windowSeconds = 15.0
+            let stepMs = 1000
+            #else
+            let windowSeconds = 10.0
+            let stepMs = 500
+            #endif
+
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
                 sourceLanguage: from.modelName,
-                windowSeconds: 10.0,
-                stepMs: 500,
+                windowSeconds: windowSeconds,
+                stepMs: stepMs,
                 enableVAD: true,
                 enableTranslation: false
             )
@@ -236,11 +252,19 @@ final class LiveTranslateViewModel: ObservableObject {
                     status = (self.model == nil) ? .idle : .ready
                 }
             }
+            #if os(iOS)
+            let windowSeconds = 15.0
+            let stepMs = 1000
+            #else
+            let windowSeconds = 10.0
+            let stepMs = 500
+            #endif
+
             let options = RealtimeTranslationOptions(
                 targetLanguage: "English",
                 sourceLanguage: from.modelName,
-                windowSeconds: 10.0,
-                stepMs: 500,
+                windowSeconds: windowSeconds,
+                stepMs: stepMs,
                 enableVAD: true,
                 enableTranslation: false
             )
