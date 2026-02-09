@@ -60,48 +60,67 @@ public class Qwen3ASRModel {
         language: String? = nil,
         maxTokens: Int = 448
     ) -> String {
-        // Extract mel features
-        let melFeatures = featureExtractor.process(audio, sampleRate: sampleRate)
+        let env = ProcessInfo.processInfo.environment
+        let rawDevice = env["QWEN3_ASR_DEVICE"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // iOS Metal backend support varies by device/OS; default to CPU for correctness unless
+        // explicitly forced to GPU via `QWEN3_ASR_DEVICE=gpu`.
+        let device: Device = {
+            #if os(iOS)
+            return (rawDevice == "gpu") ? .gpu : .cpu
+            #else
+            return (rawDevice == "cpu") ? .cpu : .gpu
+            #endif
+        }()
 
         if Qwen3ASRDebug.enabled {
-            Qwen3ASRDebug.log("Mel features shape: \(melFeatures.shape)")
-            if Qwen3ASRDebug.tensorStatsEnabled {
-                let melFlat = melFeatures.flattened()
-                Qwen3ASRDebug.logTensorStats("Mel features - mean: \(mean(melFlat).item(Float.self)), std: \(sqrt(variance(melFlat)).item(Float.self))")
+            Qwen3ASRDebug.log("Qwen3ASRModel.transcribe: device=\(device)")
+        }
+
+        return Device.withDefaultDevice(device) {
+            // Extract mel features
+            let melFeatures = featureExtractor.process(audio, sampleRate: sampleRate)
+
+            if Qwen3ASRDebug.enabled {
+                Qwen3ASRDebug.log("Mel features shape: \(melFeatures.shape)")
+                if Qwen3ASRDebug.tensorStatsEnabled {
+                    let melFlat = melFeatures.flattened()
+                    Qwen3ASRDebug.logTensorStats("Mel features - mean: \(mean(melFlat).item(Float.self)), std: \(sqrt(variance(melFlat)).item(Float.self))")
+                }
             }
-        }
 
-        // Add batch dimension: [mel, time] -> [1, mel, time]
-        let batchedFeatures = melFeatures.expandedDimensions(axis: 0)
+            // Add batch dimension: [mel, time] -> [1, mel, time]
+            let batchedFeatures = melFeatures.expandedDimensions(axis: 0)
 
-        // Encode audio - returns [time, features] without batch dim (matching Python)
-        var audioEmbeds = audioEncoder(batchedFeatures)
+            // Encode audio - returns [time, features] without batch dim (matching Python)
+            var audioEmbeds = audioEncoder(batchedFeatures)
 
-        // Add batch dimension for consistency: [time, features] -> [1, time, features]
-        audioEmbeds = audioEmbeds.expandedDimensions(axis: 0)
+            // Add batch dimension for consistency: [time, features] -> [1, time, features]
+            audioEmbeds = audioEmbeds.expandedDimensions(axis: 0)
 
-        if Qwen3ASRDebug.enabled {
-            Qwen3ASRDebug.log("Audio embeds shape: \(audioEmbeds.shape)")
-            if Qwen3ASRDebug.tensorStatsEnabled {
-                let embedsFlat = audioEmbeds.flattened()
-                Qwen3ASRDebug.logTensorStats("Audio embeds - mean: \(mean(embedsFlat).item(Float.self)), std: \(sqrt(variance(embedsFlat)).item(Float.self))")
-                Qwen3ASRDebug.logTensorStats("Audio embeds - min: \(min(embedsFlat).item(Float.self)), max: \(max(embedsFlat).item(Float.self))")
+            if Qwen3ASRDebug.enabled {
+                Qwen3ASRDebug.log("Audio embeds shape: \(audioEmbeds.shape)")
+                if Qwen3ASRDebug.tensorStatsEnabled {
+                    let embedsFlat = audioEmbeds.flattened()
+                    Qwen3ASRDebug.logTensorStats("Audio embeds - mean: \(mean(embedsFlat).item(Float.self)), std: \(sqrt(variance(embedsFlat)).item(Float.self))")
+                    Qwen3ASRDebug.logTensorStats("Audio embeds - min: \(min(embedsFlat).item(Float.self)), max: \(max(embedsFlat).item(Float.self))")
+                }
             }
-        }
 
-        // Check if text decoder is loaded
-        guard let textDecoder = textDecoder else {
-            let shape = audioEmbeds.shape
-            return "[Audio encoded: \(shape)] - Text decoder not loaded"
-        }
+            // Check if text decoder is loaded
+            guard let textDecoder = textDecoder else {
+                let shape = audioEmbeds.shape
+                return "[Audio encoded: \(shape)] - Text decoder not loaded"
+            }
 
-        // Generate text using the text decoder
-        return generateText(
-            audioEmbeds: audioEmbeds,
-            textDecoder: textDecoder,
-            language: language,
-            maxTokens: maxTokens
-        )
+            // Generate text using the text decoder
+            return generateText(
+                audioEmbeds: audioEmbeds,
+                textDecoder: textDecoder,
+                language: language,
+                maxTokens: maxTokens
+            )
+        }
     }
 
     /// Generate text from audio embeddings

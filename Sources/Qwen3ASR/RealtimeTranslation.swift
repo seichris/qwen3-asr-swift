@@ -463,9 +463,8 @@ public actor RealtimeTranslator {
         maxTokens: Int
     ) async -> String {
         let model = self.model
-        // Keep MLX execution inside a Swift Concurrency task (TaskLocal device/stream).
-        // Also keep allocations bounded with autoreleasepool on iOS.
-        return await Task.detached(priority: .userInitiated) {
+        // Keep allocations bounded with autoreleasepool on iOS, and don't block the actor.
+        return await Task(priority: .userInitiated) {
             autoreleasepool {
                 model.transcribe(
                     audio: audio,
