@@ -6,6 +6,11 @@ import Translation
 struct ContentView: View {
     @StateObject private var vm = LiveTranslateViewModel()
 
+    private struct RunTaskID: Equatable {
+        var isRunning: Bool
+        var provider: TranslationProvider
+    }
+
     private enum TranslationProvider: String, CaseIterable, Identifiable, Equatable {
         case apple
         case googleCloud
@@ -82,7 +87,7 @@ struct ContentView: View {
                 to: to
             )
         }
-        .task(id: (vm.isRunning, translationProvider)) {
+        .task(id: RunTaskID(isRunning: vm.isRunning, provider: translationProvider)) {
             guard vm.isRunning else { return }
             switch translationProvider {
             case .off:
