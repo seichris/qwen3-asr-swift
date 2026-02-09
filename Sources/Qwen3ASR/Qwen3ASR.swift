@@ -340,6 +340,10 @@ public class Qwen3ASRModel {
     }
 }
 
+// The model is used across concurrency boundaries (realtime loops, UI tasks).
+// We treat it as effectively immutable after construction/weight load.
+extension Qwen3ASRModel: @unchecked Sendable {}
+
 // MARK: - Model Loading
 
 public extension Qwen3ASRModel {

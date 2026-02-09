@@ -107,44 +107,31 @@ public actor RealtimeTranslator {
                     // Create the stream before starting capture to avoid dropping early audio.
                     let frames = await audioSource.frames()
                     try await audioSource.start()
-                    
-                    // Process audio frames
-                    for await frame in frames {
-                        if Task.isCancelled { break }
 
-                        // Add to ring buffer (keeps newest samples).
-                        audioBuffer.append(contentsOf: frame)
-                        samplesSinceLastInference += frame.count
-                        
-                        // Process VAD
-                        if let vad = self.vad {
-                            let vadState = await vad.process(frame: frame)
-                            if case .speechEnd = vadState {
-                                // Force commit on speech end
-                                let forced = await self.stabilizer.forceCommit()
-                                if !forced.newlyCommitted.isEmpty {
-                                    continuation.yield(.init(
-                                        kind: .final,
-                                        transcript: forced.newlyCommitted,
-                                        isStable: true
-                                    ))
-
-                                    if options.enableTranslation {
-                                        await translateAndEmit(
-                                            text: forced.newlyCommitted,
-                                            audio: audioBuffer.toArray(),
-                                            continuation: continuation
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // Run transcription periodically
-                        if self.shouldProcess() {
-                            await self.processAudioBuffer(continuation: continuation)
+                    // IMPORTANT: Do not block frame ingestion while running inference.
+                    // On slower devices (notably iPhone in Debug) inference can take > stepMs,
+                    // and pausing the frame loop causes AsyncStream buffering to drop audio.
+                    // That produces discontinuous windows and "gibberish" transcripts.
+                    let ingestTask = Task {
+                        for await frame in frames {
+                            if Task.isCancelled { break }
+                            await self.ingest(frame: frame, continuation: continuation)
                         }
                     }
+                    let inferenceTask = Task {
+                        while !Task.isCancelled {
+                            // Small polling interval; actual cadence is governed by `shouldProcess()`.
+                            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                            if await self.shouldProcess() {
+                                await self.processAudioBuffer(continuation: continuation)
+                            }
+                        }
+                    }
+
+                    // When audio ends (or stop() finishes the frames stream), stop scheduling inference.
+                    _ = await ingestTask.result
+                    inferenceTask.cancel()
+                    _ = await inferenceTask.result
                     
                     // Final processing
                     await self.finalize(continuation: continuation)
@@ -166,6 +153,41 @@ public actor RealtimeTranslator {
         }
     }
 
+    private func ingest(
+        frame: [Float],
+        continuation: AsyncStream<RealtimeTranslationEvent>.Continuation
+    ) async {
+        // Add to ring buffer (keeps newest samples).
+        audioBuffer.append(contentsOf: frame)
+        samplesSinceLastInference += frame.count
+
+        // Process VAD
+        if let vad = self.vad {
+            let vadState = await vad.process(frame: frame)
+            if case .speechEnd = vadState {
+                // Force commit on speech end
+                let forced = await self.stabilizer.forceCommit()
+                if !forced.newlyCommitted.isEmpty {
+                    continuation.yield(.init(
+                        kind: .final,
+                        transcript: forced.newlyCommitted,
+                        isStable: true
+                    ))
+
+                    // Best-effort translation is kept here for API compatibility, but it can be expensive.
+                    // It is gated by `isInferring` to avoid overlapping model calls.
+                    if options.enableTranslation, !isInferring {
+                        await translateAndEmit(
+                            text: forced.newlyCommitted,
+                            audio: audioBuffer.toArray(),
+                            continuation: continuation
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private func resetStreamingState(sampleRate: Int) async {
         self.sampleRate = sampleRate
         self.maxBufferSize = max(1, Int(options.windowSeconds * Double(sampleRate)))
@@ -177,7 +199,7 @@ public actor RealtimeTranslator {
     }
     
     /// Check if we should run transcription now
-    private func shouldProcess() -> Bool {
+    private func shouldProcess() async -> Bool {
         if isInferring { return false }
         if audioBuffer.size < Int(0.5 * Double(sampleRate)) { return false } // need enough audio
         return samplesSinceLastInference >= stepSamples
@@ -195,7 +217,7 @@ public actor RealtimeTranslator {
         let t0 = DispatchTime.now().uptimeNanoseconds
         
         // Run transcription
-        let rawTranscript = model.transcribe(
+        let rawTranscript = await transcribeAsync(
             audio: audioSnapshot,
             sampleRate: sampleRate,
             language: options.sourceLanguage,
@@ -261,7 +283,7 @@ public actor RealtimeTranslator {
     ) async {
         // Prefer "built-in" translation behavior by forcing output language during ASR decoding.
         // This avoids relying on text-only prompting/tokenization, which is not robust yet.
-        let translatedRaw = model.transcribe(
+        let translatedRaw = await transcribeAsync(
             audio: audio,
             sampleRate: sampleRate,
             language: options.targetLanguage,
@@ -359,6 +381,26 @@ public actor RealtimeTranslator {
             }
         }
         return String(current.dropFirst(overlap))
+    }
+
+    private func transcribeAsync(
+        audio: [Float],
+        sampleRate: Int,
+        language: String?,
+        maxTokens: Int
+    ) async -> String {
+        let model = self.model
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let out = model.transcribe(
+                    audio: audio,
+                    sampleRate: sampleRate,
+                    language: language,
+                    maxTokens: maxTokens
+                )
+                cont.resume(returning: out)
+            }
+        }
     }
 }
 
