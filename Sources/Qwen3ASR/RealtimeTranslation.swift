@@ -225,6 +225,13 @@ public actor RealtimeTranslator {
         )
         let t1 = DispatchTime.now().uptimeNanoseconds
 
+        // Hard throttle: if we fell behind while inferring (iPhone Debug is common),
+        // drop backlog instead of trying to "catch up" with back-to-back inference calls.
+        // We still keep the ring buffer up-to-date, so the next inference uses fresh audio.
+        if samplesSinceLastInference >= stepSamples {
+            samplesSinceLastInference = 0
+        }
+
         let parsed = Self.parseASROutput(rawTranscript)
         let transcript = parsed.text
         
@@ -392,12 +399,16 @@ public actor RealtimeTranslator {
         let model = self.model
         return await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
-                let out = model.transcribe(
-                    audio: audio,
-                    sampleRate: sampleRate,
-                    language: language,
-                    maxTokens: maxTokens
-                )
+                // On iOS, repeated inference can build up temporary allocations on background threads.
+                // Keep them bounded so we don't spiral into Metal/driver issues.
+                let out = autoreleasepool {
+                    model.transcribe(
+                        audio: audio,
+                        sampleRate: sampleRate,
+                        language: language,
+                        maxTokens: maxTokens
+                    )
+                }
                 cont.resume(returning: out)
             }
         }
