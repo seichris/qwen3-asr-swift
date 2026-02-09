@@ -19,8 +19,40 @@ public enum WeightLoader {
         Qwen3ASRDebug.log("WeightLoader: casting \(name) bfloat16 -> float32 (iOS)")
         return array.asType(.float32)
     }
+
+    /// iOS devices don't support bfloat16 the same way macOS does. Float weights in bfloat16 can lead
+    /// to silently-wrong inference (gibberish output) even if kernels compile successfully.
+    ///
+    /// Default to float16 to keep memory reasonable; allow forcing float32 for debugging.
+    private static func castFloatWeightForiOS(_ array: MLXArray, name: String) -> MLXArray {
+        guard array.dtype == .bfloat16 else { return array }
+
+        let raw = ProcessInfo.processInfo.environment["QWEN3_ASR_IOS_BF16_WEIGHTS_FP32"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let useFP32: Bool = {
+            switch raw {
+            case "1", "true", "yes", "y", "on":
+                return true
+            default:
+                return false
+            }
+        }()
+
+        if useFP32 {
+            Qwen3ASRDebug.log("WeightLoader: casting \(name) bfloat16 -> float32 (iOS)")
+            return array.asType(.float32)
+        } else {
+            Qwen3ASRDebug.log("WeightLoader: casting \(name) bfloat16 -> float16 (iOS)")
+            return array.asType(.float16)
+        }
+    }
     #else
     private static func castQuantParamForiOS(_ array: MLXArray, name: String) -> MLXArray {
+        array
+    }
+
+    private static func castFloatWeightForiOS(_ array: MLXArray, name: String) -> MLXArray {
         array
     }
     #endif
@@ -199,7 +231,7 @@ public enum WeightLoader {
         var params: [String: NestedItem<String, MLXArray>] = [:]
 
         if let weight = weights["\(prefix).weight"] {
-            params["weight"] = .value(weight)
+            params["weight"] = .value(castFloatWeightForiOS(weight, name: "\(prefix).weight"))
         }
 
         if !params.isEmpty {
@@ -244,10 +276,10 @@ public enum WeightLoader {
         // The mlx-community model weights are already in MLX format: [out_channels, kH, kW, in_channels]
         // No transpose needed
         if let weight = weights["\(prefix).weight"] {
-            params["weight"] = .value(weight)
+            params["weight"] = .value(castFloatWeightForiOS(weight, name: "\(prefix).weight"))
         }
         if let bias = weights["\(prefix).bias"] {
-            params["bias"] = .value(bias)
+            params["bias"] = .value(castFloatWeightForiOS(bias, name: "\(prefix).bias"))
         }
 
         if !params.isEmpty {
@@ -263,10 +295,10 @@ public enum WeightLoader {
         var params: [String: NestedItem<String, MLXArray>] = [:]
 
         if let weight = weights["\(prefix).weight"] {
-            params["weight"] = .value(weight)
+            params["weight"] = .value(castFloatWeightForiOS(weight, name: "\(prefix).weight"))
         }
         if let bias = weights["\(prefix).bias"] {
-            params["bias"] = .value(bias)
+            params["bias"] = .value(castFloatWeightForiOS(bias, name: "\(prefix).bias"))
         }
 
         if !params.isEmpty {
@@ -282,10 +314,10 @@ public enum WeightLoader {
         var params: [String: NestedItem<String, MLXArray>] = [:]
 
         if let weight = weights["\(prefix).weight"] {
-            params["weight"] = .value(weight)
+            params["weight"] = .value(castFloatWeightForiOS(weight, name: "\(prefix).weight"))
         }
         if let bias = weights["\(prefix).bias"] {
-            params["bias"] = .value(bias)
+            params["bias"] = .value(castFloatWeightForiOS(bias, name: "\(prefix).bias"))
         }
 
         if !params.isEmpty {
