@@ -77,6 +77,22 @@ public actor RealtimeTranslator {
     
     // Track last emitted translation text so we can emit only the suffix.
     private var lastTranslatedText: String = ""
+
+    // Count inferences for debugging.
+    private var inferenceCount: Int = 0
+
+    private static let realtimeMaxTokens: Int = {
+        let env = ProcessInfo.processInfo.environment
+        if let raw = env["QWEN3_ASR_REALTIME_MAX_TOKENS"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let n = Int(raw), n > 0 {
+            return n
+        }
+        #if os(iOS)
+        return 96
+        #else
+        return 200
+        #endif
+    }()
     
     public init(
         model: Qwen3ASRModel,
@@ -212,6 +228,7 @@ public actor RealtimeTranslator {
         isInferring = true
         defer { isInferring = false }
         samplesSinceLastInference = 0
+        inferenceCount += 1
 
         let audioSnapshot = audioBuffer.toArray()
         let t0 = DispatchTime.now().uptimeNanoseconds
@@ -221,7 +238,7 @@ public actor RealtimeTranslator {
             audio: audioSnapshot,
             sampleRate: sampleRate,
             language: options.sourceLanguage,
-            maxTokens: 200
+            maxTokens: Self.realtimeMaxTokens
         )
         let t1 = DispatchTime.now().uptimeNanoseconds
 
@@ -247,6 +264,10 @@ public actor RealtimeTranslator {
         continuation.yield(event)
 
         if Qwen3ASRDebug.enabled {
+            let ms = Double(t1 - t0) / 1_000_000.0
+            let msStr = String(format: "%.2f", ms)
+            let mem = Qwen3ASRRuntimeMetrics.residentMemoryMB().map(String.init) ?? ""
+            Qwen3ASRDebug.log("RealtimeTranslator: inference=\(inferenceCount) inference_ms=\(msStr) audio_samples=\(audioSnapshot.count) ring=\(audioBuffer.size) mem_mb=\(mem)")
             continuation.yield(.init(
                 kind: .metrics,
                 transcript: "",
@@ -255,8 +276,9 @@ public actor RealtimeTranslator {
                 metadata: [
                     "audio_samples": "\(audioSnapshot.count)",
                     "sample_rate": "\(sampleRate)",
-                    "inference_ms": String(format: "%.2f", Double(t1 - t0) / 1_000_000.0),
+                    "inference_ms": msStr,
                     "detected_language": parsed.language ?? "",
+                    "resident_mb": mem,
                 ]
             ))
         }
@@ -294,7 +316,7 @@ public actor RealtimeTranslator {
             audio: audio,
             sampleRate: sampleRate,
             language: options.targetLanguage,
-            maxTokens: 200
+            maxTokens: Self.realtimeMaxTokens
         )
 
         let translatedFull = Self.parseASROutput(translatedRaw).text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -407,9 +407,9 @@ public class Qwen3AudioEncoder: Module {
         let posEmbed = createSinusoidalPositionEmbeddings(seqLen: timeAfterConv, dModel: config.dModel)
         x = x + posEmbed  // Broadcasting: [numChunks, time, 896] + [1, time, 896]
 
-        if Qwen3ASRDebug.enabled {
+        if Qwen3ASRDebug.tensorStatsEnabled {
             let flat = x.flattened()
-            Qwen3ASRDebug.log("AudioEncoder: After pos embed - mean: \(mean(flat).item(Float.self)), std: \(sqrt(variance(flat)).item(Float.self))")
+            Qwen3ASRDebug.logTensorStats("AudioEncoder: After pos embed - mean: \(mean(flat).item(Float.self)), std: \(sqrt(variance(flat)).item(Float.self))")
         }
 
         // Calculate valid lengths after CNN for each chunk
@@ -482,9 +482,9 @@ public class Qwen3AudioEncoder: Module {
         // Post processing
         hiddenStates = lnPost(hiddenStates)
 
-        if Qwen3ASRDebug.enabled {
+        if Qwen3ASRDebug.tensorStatsEnabled {
             let postLnFlat = hiddenStates.flattened()
-            Qwen3ASRDebug.log("AudioEncoder: After ln_post - mean: \(mean(postLnFlat).item(Float.self)), std: \(sqrt(variance(postLnFlat)).item(Float.self))")
+            Qwen3ASRDebug.logTensorStats("AudioEncoder: After ln_post - mean: \(mean(postLnFlat).item(Float.self)), std: \(sqrt(variance(postLnFlat)).item(Float.self))")
         }
 
         // Project to text model dimension (GELU activation)
@@ -492,9 +492,9 @@ public class Qwen3AudioEncoder: Module {
         hiddenStates = gelu(hiddenStates)
         hiddenStates = proj2(hiddenStates)
 
-        if Qwen3ASRDebug.enabled {
+        if Qwen3ASRDebug.tensorStatsEnabled {
             let finalFlat = hiddenStates.flattened()
-            Qwen3ASRDebug.log("AudioEncoder: Final output - mean: \(mean(finalFlat).item(Float.self)), std: \(sqrt(variance(finalFlat)).item(Float.self)), shape [\(hiddenStates.dim(0)), \(hiddenStates.dim(1))]")
+            Qwen3ASRDebug.logTensorStats("AudioEncoder: Final output - mean: \(mean(finalFlat).item(Float.self)), std: \(sqrt(variance(finalFlat)).item(Float.self)), shape [\(hiddenStates.dim(0)), \(hiddenStates.dim(1))]")
         }
 
         return hiddenStates

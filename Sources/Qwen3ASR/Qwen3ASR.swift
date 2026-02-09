@@ -64,9 +64,11 @@ public class Qwen3ASRModel {
         let melFeatures = featureExtractor.process(audio, sampleRate: sampleRate)
 
         if Qwen3ASRDebug.enabled {
-            let melFlat = melFeatures.flattened()
             Qwen3ASRDebug.log("Mel features shape: \(melFeatures.shape)")
-            Qwen3ASRDebug.log("Mel features - mean: \(mean(melFlat).item(Float.self)), std: \(sqrt(variance(melFlat)).item(Float.self))")
+            if Qwen3ASRDebug.tensorStatsEnabled {
+                let melFlat = melFeatures.flattened()
+                Qwen3ASRDebug.logTensorStats("Mel features - mean: \(mean(melFlat).item(Float.self)), std: \(sqrt(variance(melFlat)).item(Float.self))")
+            }
         }
 
         // Add batch dimension: [mel, time] -> [1, mel, time]
@@ -79,10 +81,12 @@ public class Qwen3ASRModel {
         audioEmbeds = audioEmbeds.expandedDimensions(axis: 0)
 
         if Qwen3ASRDebug.enabled {
-            let embedsFlat = audioEmbeds.flattened()
             Qwen3ASRDebug.log("Audio embeds shape: \(audioEmbeds.shape)")
-            Qwen3ASRDebug.log("Audio embeds - mean: \(mean(embedsFlat).item(Float.self)), std: \(sqrt(variance(embedsFlat)).item(Float.self))")
-            Qwen3ASRDebug.log("Audio embeds - min: \(min(embedsFlat).item(Float.self)), max: \(max(embedsFlat).item(Float.self))")
+            if Qwen3ASRDebug.tensorStatsEnabled {
+                let embedsFlat = audioEmbeds.flattened()
+                Qwen3ASRDebug.logTensorStats("Audio embeds - mean: \(mean(embedsFlat).item(Float.self)), std: \(sqrt(variance(embedsFlat)).item(Float.self))")
+                Qwen3ASRDebug.logTensorStats("Audio embeds - min: \(min(embedsFlat).item(Float.self)), max: \(max(embedsFlat).item(Float.self))")
+            }
         }
 
         // Check if text decoder is loaded
