@@ -77,6 +77,20 @@ public class Qwen3ASRModel {
 
         if Qwen3ASRDebug.enabled {
             Qwen3ASRDebug.log("Qwen3ASRModel.transcribe: device=\(device)")
+            Qwen3ASRDebug.log("Qwen3ASRModel.transcribe: audio_samples=\(audio.count) sampleRate=\(sampleRate)")
+            if !audio.isEmpty {
+                // Quick amplitude sanity (helps detect out-of-range audio on iOS).
+                var minV = Float.greatestFiniteMagnitude
+                var maxV = -Float.greatestFiniteMagnitude
+                var sumSq: Double = 0
+                for v in audio {
+                    if v < minV { minV = v }
+                    if v > maxV { maxV = v }
+                    sumSq += Double(v) * Double(v)
+                }
+                let rms = sqrt(sumSq / Double(audio.count))
+                Qwen3ASRDebug.log(String(format: "Qwen3ASRModel.transcribe: audio_min=%.6f audio_max=%.6f audio_rms=%.6f", minV, maxV, rms))
+            }
         }
 
         return Device.withDefaultDevice(device) {
@@ -85,6 +99,7 @@ public class Qwen3ASRModel {
 
             if Qwen3ASRDebug.enabled {
                 Qwen3ASRDebug.log("Mel features shape: \(melFeatures.shape)")
+                Qwen3ASRDebug.log("Mel features dtype: \(melFeatures.dtype)")
                 if Qwen3ASRDebug.tensorStatsEnabled {
                     let melFlat = melFeatures.flattened()
                     Qwen3ASRDebug.logTensorStats("Mel features - mean: \(mean(melFlat).item(Float.self)), std: \(sqrt(variance(melFlat)).item(Float.self))")
@@ -102,6 +117,7 @@ public class Qwen3ASRModel {
 
             if Qwen3ASRDebug.enabled {
                 Qwen3ASRDebug.log("Audio embeds shape: \(audioEmbeds.shape)")
+                Qwen3ASRDebug.log("Audio embeds dtype: \(audioEmbeds.dtype)")
                 if Qwen3ASRDebug.tensorStatsEnabled {
                     let embedsFlat = audioEmbeds.flattened()
                     Qwen3ASRDebug.logTensorStats("Audio embeds - mean: \(mean(embedsFlat).item(Float.self)), std: \(sqrt(variance(embedsFlat)).item(Float.self))")
@@ -158,19 +174,11 @@ public class Qwen3ASRModel {
     ) -> String {
         let env = ProcessInfo.processInfo.environment
         let shouldScaleAudioEmbeds: Bool = {
-            // Scaling requires expensive global variance computations.
-            // Default off on iOS where it can dominate realtime latency; opt-in via env var.
-            #if os(iOS)
-            let raw = env["QWEN3_ASR_SCALE_AUDIO_EMBEDS"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
-            #else
+            // Default ON everywhere (matches CLI). Disable via env var when needed for performance.
             let raw = env["QWEN3_ASR_DISABLE_EMBED_SCALE"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
             return !(raw == "1" || raw == "true" || raw == "yes" || raw == "on")
-            #endif
         }()
 
         // Qwen3-ASR prompt format (from mlx-audio implementation):
@@ -330,6 +338,13 @@ public class Qwen3ASRModel {
             Qwen3ASRDebug.log("Input embeds shape: \(inputEmbeds.shape), hidden states shape: \(hiddenStates.shape)")
         }
 
+        let streamTokens: Bool = {
+            let raw = env["QWEN3_ASR_DEBUG_STREAM_TOKENS"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+        }()
+
         // Continue generating
         for iteration in 1..<maxTokens {
             // Check for EOS
@@ -346,10 +361,16 @@ public class Qwen3ASRModel {
             cache = newCache
 
             // Get next token
-            let lastHiddenNext = hiddenStates[0..., (-1)..., .ellipsis]
+            // hiddenStates is [1, 1, hidden] here; avoid negative-index slicing which has
+            // had backend-specific quirks on some iOS/Metal builds.
+            let lastHiddenNext = hiddenStates
             logits = textDecoder.embedTokens.asLinear(lastHiddenNext)
             nextToken = argMax(logits, axis: -1).squeezed().item(Int32.self)
             generatedTokens.append(nextToken)
+
+            if Qwen3ASRDebug.enabled, streamTokens, iteration % 16 == 0 {
+                Qwen3ASRDebug.log("Tokens@\(iteration): \(Array(generatedTokens.suffix(16)))")
+            }
         }
 
         if Qwen3ASRDebug.enabled {
