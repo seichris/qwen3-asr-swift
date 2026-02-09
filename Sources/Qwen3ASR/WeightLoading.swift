@@ -8,11 +8,16 @@ public enum WeightLoader {
 
     #if os(iOS)
     /// iOS Metal kernels are less forgiving about bfloat16 quantization parameters.
-    /// Casting scales/biases to float16 is a pragmatic compatibility fix for A-series GPUs.
+    ///
+    /// Prefer casting quantization scales/biases to float32:
+    /// - float16 can underflow/overflow vs bfloat16 due to its narrower exponent range
+    /// - a "successful" cast-to-f16 can still silently corrupt quant params and produce gibberish tokens
+    ///
+    /// This is correctness-first. Quant params are small relative to the packed 4-bit weights.
     private static func castQuantParamForiOS(_ array: MLXArray, name: String) -> MLXArray {
         guard array.dtype == .bfloat16 else { return array }
-        Qwen3ASRDebug.log("WeightLoader: casting \(name) bfloat16 -> float16 (iOS)")
-        return array.asType(.float16)
+        Qwen3ASRDebug.log("WeightLoader: casting \(name) bfloat16 -> float32 (iOS)")
+        return array.asType(.float32)
     }
     #else
     private static func castQuantParamForiOS(_ array: MLXArray, name: String) -> MLXArray {
