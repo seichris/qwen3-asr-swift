@@ -74,6 +74,11 @@ public actor RealtimeTranslator {
     private var stepSamples: Int = 1
     private var samplesSinceLastInference: Int = 0
     private var isInferring: Bool = false
+
+    // VAD-driven gating: avoid running ASR on silence (saves a lot of compute on iOS).
+    private var inSpeech: Bool = false
+    private var forceInference: Bool = false
+    private var commitAfterInference: Bool = false
     
     // Track last emitted translation text so we can emit only the suffix.
     private var lastTranslatedText: String = ""
@@ -91,6 +96,21 @@ public actor RealtimeTranslator {
         return 96
         #else
         return 200
+        #endif
+    }()
+
+    private static let realtimeMaxAudioSeconds: Double? = {
+        let env = ProcessInfo.processInfo.environment
+        if let raw = env["QWEN3_ASR_REALTIME_MAX_AUDIO_SECONDS"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let s = Double(raw), s > 0 {
+            return s
+        }
+        #if os(iOS)
+        // Keep the decode window small enough for iPhone-class devices.
+        return 4.0
+        #else
+        // Desktop can typically handle the full sliding window.
+        return nil
         #endif
     }()
     
@@ -180,26 +200,16 @@ public actor RealtimeTranslator {
         // Process VAD
         if let vad = self.vad {
             let vadState = await vad.process(frame: frame)
-            if case .speechEnd = vadState {
-                // Force commit on speech end
-                let forced = await self.stabilizer.forceCommit()
-                if !forced.newlyCommitted.isEmpty {
-                    continuation.yield(.init(
-                        kind: .final,
-                        transcript: forced.newlyCommitted,
-                        isStable: true
-                    ))
-
-                    // Best-effort translation is kept here for API compatibility, but it can be expensive.
-                    // It is gated by `isInferring` to avoid overlapping model calls.
-                    if options.enableTranslation, !isInferring {
-                        await translateAndEmit(
-                            text: forced.newlyCommitted,
-                            audio: audioBuffer.toArray(),
-                            continuation: continuation
-                        )
-                    }
-                }
+            switch vadState {
+            case .silence:
+                inSpeech = false
+            case .speech(_):
+                inSpeech = true
+            case .speechEnd(_):
+                inSpeech = false
+                // Run one more inference on the freshest window, then force-commit pending text.
+                forceInference = true
+                commitAfterInference = true
             }
         }
     }
@@ -210,6 +220,9 @@ public actor RealtimeTranslator {
         self.stepSamples = max(1, Int(Double(sampleRate) * Double(options.stepMs) / 1000.0))
         self.samplesSinceLastInference = 0
         self.isInferring = false
+        self.inSpeech = false
+        self.forceInference = false
+        self.commitAfterInference = false
         self.audioBuffer = FloatRingBuffer(capacity: maxBufferSize)
         await stabilizer.reset()
     }
@@ -218,6 +231,8 @@ public actor RealtimeTranslator {
     private func shouldProcess() async -> Bool {
         if isInferring { return false }
         if audioBuffer.size < Int(0.5 * Double(sampleRate)) { return false } // need enough audio
+        if forceInference { return true }
+        if vad != nil && !inSpeech { return false }
         return samplesSinceLastInference >= stepSamples
     }
     
@@ -227,10 +242,19 @@ public actor RealtimeTranslator {
         guard !isInferring else { return }
         isInferring = true
         defer { isInferring = false }
+        let shouldCommitAfter = commitAfterInference
+        commitAfterInference = false
+        forceInference = false
         samplesSinceLastInference = 0
         inferenceCount += 1
 
-        let audioSnapshot = audioBuffer.toArray()
+        var audioSnapshot = audioBuffer.toArray()
+        if let maxSeconds = Self.realtimeMaxAudioSeconds {
+            let maxSamples = max(1, Int(Double(sampleRate) * maxSeconds))
+            if audioSnapshot.count > maxSamples {
+                audioSnapshot = Array(audioSnapshot.suffix(maxSamples))
+            }
+        }
         let t0 = DispatchTime.now().uptimeNanoseconds
         
         // Run transcription
@@ -299,6 +323,26 @@ public actor RealtimeTranslator {
                     audio: audioSnapshot,
                     continuation: continuation
                 )
+            }
+        }
+
+        // On speech end, force-commit any remaining pending text after one last inference.
+        if shouldCommitAfter {
+            let forced = await stabilizer.forceCommit()
+            if !forced.newlyCommitted.isEmpty {
+                continuation.yield(.init(
+                    kind: .final,
+                    transcript: forced.newlyCommitted,
+                    isStable: true
+                ))
+
+                if options.enableTranslation {
+                    await translateAndEmit(
+                        text: forced.newlyCommitted,
+                        audio: audioSnapshot,
+                        continuation: continuation
+                    )
+                }
             }
         }
 

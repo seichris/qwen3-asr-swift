@@ -135,6 +135,23 @@ public class Qwen3ASRModel {
         isTextOnly: Bool,
         prompt: String?
     ) -> String {
+        let env = ProcessInfo.processInfo.environment
+        let shouldScaleAudioEmbeds: Bool = {
+            // Scaling requires expensive global variance computations.
+            // Default off on iOS where it can dominate realtime latency; opt-in via env var.
+            #if os(iOS)
+            let raw = env["QWEN3_ASR_SCALE_AUDIO_EMBEDS"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+            #else
+            let raw = env["QWEN3_ASR_DISABLE_EMBED_SCALE"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return !(raw == "1" || raw == "true" || raw == "yes" || raw == "on")
+            #endif
+        }()
+
         // Qwen3-ASR prompt format (from mlx-audio implementation):
         // <|im_start|>system\n<|im_end|>\n
         // <|im_start|>user\n<|audio_start|><|audio_pad|>...<|audio_end|><|im_end|>\n
@@ -228,24 +245,26 @@ public class Qwen3ASRModel {
 
 	        // If we have audio embeddings, insert them into the prompt
 	        if let audioEmbeds = audioEmbeds, numAudioTokens > 0 {
-            // Compare embedding scales.
-            let textEmbedsFlat = inputEmbeds.flattened()
-            let textStd = sqrt(variance(textEmbedsFlat)).item(Float.self)
-
-            let audioEmbedsFlat = audioEmbeds.flattened()
-            let audioStd = sqrt(variance(audioEmbedsFlat)).item(Float.self)
-
-            if Qwen3ASRDebug.enabled {
-                Qwen3ASRDebug.log("Text embeds - mean: \(mean(textEmbedsFlat).item(Float.self)), std: \(textStd)")
-                Qwen3ASRDebug.log("Audio embeds (before scaling) - mean: \(mean(audioEmbedsFlat).item(Float.self)), std: \(audioStd)")
-            }
-
-            // Scale audio embeddings to match text embedding variance
             var scaledAudioEmbeds = audioEmbeds
-            if audioStd > 0 {
-                let scaleFactor = textStd / audioStd
-                scaledAudioEmbeds = audioEmbeds * scaleFactor
-                Qwen3ASRDebug.log("Scaling audio embeds by \(scaleFactor) to match text std")
+            if shouldScaleAudioEmbeds {
+                // Compare embedding scales (expensive; keep optional).
+                let textEmbedsFlat = inputEmbeds.flattened()
+                let textStd = sqrt(variance(textEmbedsFlat)).item(Float.self)
+
+                let audioEmbedsFlat = audioEmbeds.flattened()
+                let audioStd = sqrt(variance(audioEmbedsFlat)).item(Float.self)
+
+                if Qwen3ASRDebug.tensorStatsEnabled {
+                    Qwen3ASRDebug.logTensorStats("Text embeds - mean: \(mean(textEmbedsFlat).item(Float.self)), std: \(textStd)")
+                    Qwen3ASRDebug.logTensorStats("Audio embeds (before scaling) - mean: \(mean(audioEmbedsFlat).item(Float.self)), std: \(audioStd)")
+                }
+
+                // Scale audio embeddings to match text embedding variance
+                if audioStd > 0 {
+                    let scaleFactor = textStd / audioStd
+                    scaledAudioEmbeds = audioEmbeds * scaleFactor
+                    Qwen3ASRDebug.log("Scaling audio embeds by \(scaleFactor) to match text std")
+                }
             }
 
             // Replace audio_pad token positions with actual audio embeddings
@@ -282,7 +301,9 @@ public class Qwen3ASRModel {
         if Qwen3ASRDebug.enabled {
             let logitsFlat = logits.squeezed()
             Qwen3ASRDebug.log("Logits shape: \(logitsFlat.shape)")
-            Qwen3ASRDebug.log("Logits stats - mean: \(mean(logitsFlat).item(Float.self)), max: \(max(logitsFlat).item(Float.self)), min: \(min(logitsFlat).item(Float.self))")
+            if Qwen3ASRDebug.tensorStatsEnabled {
+                Qwen3ASRDebug.logTensorStats("Logits stats - mean: \(mean(logitsFlat).item(Float.self)), max: \(max(logitsFlat).item(Float.self)), min: \(min(logitsFlat).item(Float.self))")
+            }
 
             Qwen3ASRDebug.log("First token generated: \(nextToken) (EOS=\(Qwen3ASRTokens.eosTokenId))")
             Qwen3ASRDebug.log("Input embeds shape: \(inputEmbeds.shape), hidden states shape: \(hiddenStates.shape)")
