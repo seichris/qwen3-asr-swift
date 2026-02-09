@@ -355,6 +355,19 @@ public class QuantizedTextModel: Module {
             fatalError("Either inputIds or inputsEmbeds must be provided")
         }
 
+        #if os(iOS)
+        // iOS A-series GPUs can be numerically fragile when running the decoder in fp16, especially
+        // through attention/softmax. Default to fp32 activations to avoid gibberish outputs.
+        let env = ProcessInfo.processInfo.environment
+        let raw = env["QWEN3_ASR_IOS_DECODER_FP32"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let forceFP32 = !(raw == "0" || raw == "false" || raw == "no" || raw == "off")
+        if forceFP32 && hiddenStates.dtype != .float32 {
+            hiddenStates = hiddenStates.asType(.float32)
+        }
+        #endif
+
         let seqLen = hiddenStates.dim(1)
         let cacheLen = cache?.first?.0.dim(2) ?? 0
 
