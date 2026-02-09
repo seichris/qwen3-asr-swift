@@ -463,21 +463,18 @@ public actor RealtimeTranslator {
         maxTokens: Int
     ) async -> String {
         let model = self.model
-        return await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                // On iOS, repeated inference can build up temporary allocations on background threads.
-                // Keep them bounded so we don't spiral into Metal/driver issues.
-                let out = autoreleasepool {
-                    model.transcribe(
-                        audio: audio,
-                        sampleRate: sampleRate,
-                        language: language,
-                        maxTokens: maxTokens
-                    )
-                }
-                cont.resume(returning: out)
+        // Keep MLX execution inside a Swift Concurrency task (TaskLocal device/stream).
+        // Also keep allocations bounded with autoreleasepool on iOS.
+        return await Task.detached(priority: .userInitiated) {
+            autoreleasepool {
+                model.transcribe(
+                    audio: audio,
+                    sampleRate: sampleRate,
+                    language: language,
+                    maxTokens: maxTokens
+                )
             }
-        }
+        }.value
     }
 }
 

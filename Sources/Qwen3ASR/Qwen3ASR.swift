@@ -431,16 +431,11 @@ public extension Qwen3ASRModel {
     }
 
     private static func runBlocking(_ work: @escaping () throws -> Void) async throws {
-        try await withCheckedThrowingContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    try work()
-                    cont.resume(returning: ())
-                } catch {
-                    cont.resume(throwing: error)
-                }
-            }
-        }
+        // MLX uses TaskLocal state (device/stream). Running outside Swift Concurrency (e.g. GCD)
+        // can bypass that state and lead to incorrect behavior on some platforms.
+        try await Task.detached(priority: .userInitiated) {
+            try work()
+        }.value
     }
 
     // MARK: Cache Management
