@@ -233,7 +233,8 @@ public class QuantizedTextAttention: Module {
             // x shape: [batch, heads, seq, head_dim]
             // Split into first half [0:half_dim] and second half [half_dim:dim]
             let x1 = x[0..., 0..., 0..., 0..<halfDim]  // [batch, heads, seq, half_dim]
-            let x2 = x[0..., 0..., 0..., halfDim...]   // [batch, heads, seq, half_dim]
+            // Avoid open-ended slices on iOS/Metal; some builds have had slicing quirks.
+            let x2 = x[0..., 0..., 0..., halfDim..<headDim]   // [batch, heads, seq, half_dim]
 
             // Expand cos/sin for broadcasting: [seq, half_dim] -> [1, 1, seq, half_dim]
             let cosR = cosAngles.expandedDimensions(axes: [0, 1])
