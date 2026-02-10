@@ -334,15 +334,29 @@ public class QuantizedTextModel: Module {
         // Shape: [1, 1, seqLen, seqLen + cacheLen]
         let totalLen = seqLen + cacheLen
 
-        // Vectorized version (critical for iOS):
-        // Avoid per-element updates from Swift loops, which can be extremely slow and can behave
-        // inconsistently across backends. We mask positions where `j > cacheLen + i`.
+        // iOS/Metal note:
+        // We've seen "gibberish" outputs on iOS even when weights, softmax, and quantizedMM checks pass.
+        // One remaining suspect is backend correctness for `triu()`-built masks on some iOS GPUs.
         //
-        // Use `triu(ones, k: cacheLen + 1)` which yields 1s for j >= i + cacheLen + 1,
-        // i.e. j > cacheLen + i, and 0 elsewhere.
-        let ones = MLXArray.ones([seqLen, totalLen], dtype: .float32)
-        let upper = triu(ones, k: cacheLen + 1)
-        let mask = upper * Float(-1e9)
+        // To make this maximally robust, build the mask explicitly on the CPU as a Float buffer:
+        // mask[i,j] = -1e9 if j > cacheLen + i else 0.
+        //
+        // This is small (seqLen is usually <= ~200 for prefill; in decode seqLen=1), and avoids relying
+        // on `triu()` semantics on Metal.
+        var data = [Float](repeating: 0, count: seqLen * totalLen)
+        if totalLen > 0 && seqLen > 0 {
+            for i in 0..<seqLen {
+                let row = i * totalLen
+                let limit = cacheLen + i
+                let start = limit + 1
+                if start < totalLen {
+                    for j in start..<totalLen {
+                        data[row + j] = -1e9
+                    }
+                }
+            }
+        }
+        let mask = MLXArray(data, [seqLen, totalLen])
 
         // Add batch and head dimensions: [seqLen, totalLen] -> [1, 1, seqLen, totalLen]
         return mask.expandedDimensions(axes: [0, 1])
