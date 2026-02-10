@@ -349,8 +349,10 @@ public class Qwen3ASRModel {
             // We need to replace inputEmbeds[0, audioStartIndex:audioEndIndex, :] with audioEmbeds[0, :, :]
 
             // Build the final embeddings by concatenating parts
+            // Avoid open-ended slices on iOS/Metal; some builds have had slicing quirks.
+            let seqLenEmbeds = inputEmbeds.dim(1)
             let beforeAudio = inputEmbeds[0..., 0..<audioStartIndex, 0...]  // [1, audioStartIndex, hidden]
-            let afterAudio = inputEmbeds[0..., audioEndIndex..., 0...]  // [1, remaining, hidden]
+            let afterAudio = inputEmbeds[0..., audioEndIndex..<seqLenEmbeds, 0...]  // [1, remaining, hidden]
 
             inputEmbeds = concatenated([beforeAudio, scaledAudioEmbeds, afterAudio], axis: 1)
 	        }
@@ -628,6 +630,12 @@ public extension Qwen3ASRModel {
     ) async throws -> Qwen3ASRModel {
         progressHandler?(0.1, "Downloading model...")
 
+        #if os(iOS)
+        // MLX uses a buffer recycling cache which can grow during inference.
+        // On iOS, constraining this cache reduces jetsam (OOM) risk.
+        configureMLXMemoryForiOS()
+        #endif
+
         // Get cache directory
         let cacheDir = try getCacheDirectory(for: modelId)
 
@@ -691,6 +699,38 @@ public extension Qwen3ASRModel {
 
         return model
     }
+
+    #if os(iOS)
+    private static func configureMLXMemoryForiOS() {
+        let env = ProcessInfo.processInfo.environment
+
+        func parseInt(_ key: String) -> Int? {
+            guard let raw = env[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty
+            else { return nil }
+            return Int(raw)
+        }
+
+        // Allow explicit overrides:
+        // - `QWEN3_ASR_MLX_CACHE_LIMIT_MB`: cache limit in MB
+        // - `QWEN3_ASR_MLX_CACHE_LIMIT_BYTES`: cache limit in bytes
+        let bytesOverride = parseInt("QWEN3_ASR_MLX_CACHE_LIMIT_BYTES")
+        let mbOverride = parseInt("QWEN3_ASR_MLX_CACHE_LIMIT_MB")
+
+        let limitBytes: Int = {
+            if let b = bytesOverride, b >= 0 { return b }
+            if let mb = mbOverride, mb >= 0 { return mb * 1024 * 1024 }
+            // Default: keep cache modest to reduce jetsam risk.
+            // This does NOT cap active memory (weights + live tensors).
+            return 256 * 1024 * 1024
+        }()
+
+        if MLX.Memory.cacheLimit != limitBytes {
+            MLX.Memory.cacheLimit = limitBytes
+            Qwen3ASRDebug.log("MLX.Memory.cacheLimit set to \(limitBytes) bytes (iOS)")
+        }
+    }
+    #endif
 
     private static func _debugLogCachedArtifacts(cacheDir: URL) {
         let env = ProcessInfo.processInfo.environment

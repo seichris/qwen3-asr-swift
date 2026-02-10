@@ -61,14 +61,27 @@ final class LiveTranslateViewModel: ObservableObject {
         do {
             let model = try await loadModelIfNeeded(modelId: modelId)
             let raw = await Task(priority: .userInitiated) {
-                autoreleasepool {
+                        autoreleasepool {
                     do {
                         let samples = try AudioFileLoader.load(url: url, targetSampleRate: 24000)
+                        let env = ProcessInfo.processInfo.environment
+                        let maxTokens: Int = {
+                            if let raw = env["QWEN3_ASR_FILE_MAX_TOKENS"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                               let n = Int(raw), n > 0 {
+                                return min(max(n, 32), 2048)
+                            }
+                            #if os(iOS)
+                            // Keep debug file transcription modest on iPhone to reduce jetsam risk.
+                            return 256
+                            #else
+                            return 448
+                            #endif
+                        }()
                         let text = model.transcribe(
                             audio: samples,
                             sampleRate: 24000,
                             language: from.modelName,
-                            maxTokens: 448
+                            maxTokens: maxTokens
                         )
                         return (samples.count, text)
                     } catch {
