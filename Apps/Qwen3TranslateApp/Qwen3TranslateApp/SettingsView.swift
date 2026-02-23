@@ -16,6 +16,9 @@ struct SettingsView: View {
     @State private var showDeleteConfirm: Bool = false
     @State private var errorMessage: String?
     @State private var showFileImporter: Bool = false
+    @AppStorage("DASHSCOPE_API_KEY") private var dashScopeAPIKey: String = ""
+    @AppStorage("DASHSCOPE_API_KEY_SG") private var dashScopeAPIKeySG: String = ""
+    @AppStorage("QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY") private var googleTranslateAPIKey: String = ""
 
     var body: some View {
         NavigationStack {
@@ -86,12 +89,38 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("API Keys") {
+                    SecureField("DashScope Mainland (DASHSCOPE_API_KEY)", text: $dashScopeAPIKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    SecureField("DashScope Singapore (DASHSCOPE_API_KEY_SG)", text: $dashScopeAPIKeySG)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    SecureField("Google Translate (QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY)", text: $googleTranslateAPIKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Text("Keys saved here are stored in app preferences and used when Xcode environment variables are not present (for example, launching from the Home Screen).")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("About") {
                     Text("The app downloads model weights (`*.safetensors`) from Hugging Face and caches them in the app’s Caches directory. Tokenizer/config files are small; weights are the large part.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
-                    Text("If you use Google Cloud translation, set QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY in the app's environment (Xcode scheme) so the app can call the Translation API.")
+                    Text("If you use Google Cloud translation, set QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY either in Xcode scheme environment variables or in the API Keys section above.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Text("If you use DashScope hosted ASR, set DASHSCOPE_API_KEY (Mainland) or DASHSCOPE_API_KEY_SG (Singapore) in Xcode scheme environment variables or in the API Keys section above. Then choose the matching ASR source in the ASR dropdown. You can optionally set DASHSCOPE_REALTIME_MODEL to override the default model.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Text("Audio source dropdown: choose Microphone or Device Audio. Device Audio uses ReplayKit capture on iOS and requires screen-capture permission from the system prompt.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

@@ -217,6 +217,43 @@ private func runRealtime(
     }
 }
 
+private func runRealtimeHosted(
+    sourceLanguage: String?,
+    model: String,
+    enableServerVAD: Bool,
+    format: OutputFormat,
+    showPartials: Bool
+) async throws {
+    let env = ProcessInfo.processInfo.environment
+    guard let apiKey = env[DashScopeRealtimeClient.apiKeyEnvironmentVariable],
+          !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+        throw DashScopeRealtimeError.missingAPIKey
+    }
+
+    print("Starting hosted realtime transcription...")
+    print("Model: \(model)")
+    print("Source language: \(sourceLanguage ?? "auto-detect")")
+    print("Server VAD: \(enableServerVAD ? "on" : "off")")
+    print("Press Ctrl+C to stop\n")
+
+    let options = DashScopeRealtimeOptions(
+        model: model,
+        language: sourceLanguage,
+        sampleRate: 16000,
+        enableServerVAD: enableServerVAD
+    )
+
+    let client = DashScopeRealtimeClient(apiKey: apiKey, options: options)
+    let printer = RealtimeEventPrinter(format: format, showPartials: showPartials)
+    let audioSource = MicrophoneAudioSource(frameSizeMs: 20, bufferedFrames: 500)
+    let stream = await client.transcribe(audioSource: audioSource)
+
+    for await event in stream {
+        await printer.emit(event)
+    }
+}
+
 private func printPlain(_ event: RealtimeTranslationEvent) {
     switch event.kind {
     case .partial:
@@ -330,6 +367,13 @@ private struct Arguments {
             enableVAD: Bool,
             enableTranslation: Bool,
             translationProvider: TranslationProvider,
+            format: OutputFormat,
+            showPartials: Bool
+        )
+        case realtimeHosted(
+            sourceLanguage: String?,
+            model: String,
+            enableServerVAD: Bool,
             format: OutputFormat,
             showPartials: Bool
         )
@@ -461,6 +505,65 @@ private func parseArguments() -> Arguments? {
             device: device
         )
 
+    case "realtime-hosted":
+        var sourceLanguage: String? = nil
+        var hostedModel = ProcessInfo.processInfo.environment["DASHSCOPE_REALTIME_MODEL"]
+            ?? DashScopeRealtimeOptions.defaultModel
+        var enableServerVAD = true
+        var format: OutputFormat = .plain
+        var showPartials = false
+
+        var i = 2
+        while i < args.count {
+            switch args[i] {
+            case "--from":
+                if i + 1 < args.count {
+                    let lang = args[i + 1]
+                    sourceLanguage = (lang == "auto") ? nil : lang
+                    i += 2
+                } else {
+                    print("Error: --from requires a language (e.g. auto, zh, en)")
+                    return nil
+                }
+            case "--model":
+                if i + 1 < args.count {
+                    hostedModel = args[i + 1]
+                    i += 2
+                } else {
+                    print("Error: --model requires a DashScope realtime model id")
+                    return nil
+                }
+            case "--no-server-vad":
+                enableServerVAD = false
+                i += 1
+            case "--jsonl":
+                format = .jsonl
+                i += 1
+            case "--show-partials", "--partials":
+                showPartials = true
+                i += 1
+            case "--help":
+                printRealtimeHostedHelp()
+                return nil
+            default:
+                print("Unknown option: \(args[i])")
+                printRealtimeHostedHelp()
+                return nil
+            }
+        }
+
+        return Arguments(
+            command: .realtimeHosted(
+                sourceLanguage: sourceLanguage,
+                model: hostedModel,
+                enableServerVAD: enableServerVAD,
+                format: format,
+                showPartials: showPartials
+            ),
+            modelId: modelId,
+            device: device
+        )
+
     case "--help", "-h":
         printUsage()
         return nil
@@ -486,7 +589,8 @@ private func printUsage() {
     print("")
     print("Commands:")
     print("  transcribe <audio-file>    Transcribe an audio file")
-    print("  realtime                   Start realtime transcription from microphone")
+    print("  realtime                   Start local realtime transcription from microphone")
+    print("  realtime-hosted            Start DashScope hosted realtime transcription")
     print("")
     print("Realtime options:")
     print("  --to <lang>               Target translation language (default: en)")
@@ -507,11 +611,14 @@ private func printUsage() {
     print("  QWEN3_ASR_MODEL           Model ID (default: mlx-community/Qwen3-ASR-0.6B-4bit)")
     print("  QWEN3_ASR_DEVICE          Set to 'cpu' to force CPU mode")
     print("  QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY  Google Translate API key (used when --translate-provider google, or auto)")
+    print("  DASHSCOPE_API_KEY         DashScope API key (required for realtime-hosted)")
+    print("  DASHSCOPE_REALTIME_MODEL  DashScope model default for realtime-hosted")
     print("")
     print("Examples:")
     print("  qwen3-asr-cli transcribe audio.wav")
     print("  qwen3-asr-cli realtime --to en --from auto")
     print("  qwen3-asr-cli realtime --to ja --window 15 --jsonl")
+    print("  qwen3-asr-cli realtime-hosted --from zh --show-partials")
 }
 
 private func printRealtimeHelp() {
@@ -532,12 +639,24 @@ private func printRealtimeHelp() {
     print("  Examples: --to en, --to English, --from zh, --from Chinese")
 }
 
+private func printRealtimeHostedHelp() {
+    print("Usage: qwen3-asr-cli realtime-hosted [options]")
+    print("")
+    print("Options:")
+    print("  --from <lang>       Source language hint for ASR (default: auto)")
+    print("  --model <id>        DashScope realtime model id")
+    print("  --no-server-vad     Disable server-side VAD")
+    print("  --jsonl             Output structured JSONL")
+    print("  --show-partials     Print partial transcripts ([…] / [✓])")
+    print("")
+    print("Environment:")
+    print("  DASHSCOPE_API_KEY   Required")
+    print("  DASHSCOPE_REALTIME_MODEL  Optional default model")
+}
+
 // MARK: - Entry Point
 
 Task {
-    requireMetalOrExit()
-    requireMLXMetallibOrExit()
-
     guard let args = parseArguments() else {
         exit(1)
     }
@@ -545,6 +664,8 @@ Task {
     do {
         switch args.command {
         case .transcribe(let audioPath):
+            requireMetalOrExit()
+            requireMLXMetallibOrExit()
             if args.device == "cpu" {
                 try await Device.withDefaultDevice(.cpu) {
                     try await runTranscribe(audioPath: audioPath, modelId: args.modelId)
@@ -554,6 +675,8 @@ Task {
             }
 
         case .realtime(let targetLang, let sourceLang, let window, let step, let vad, let translate, let provider, let format, let showPartials):
+            requireMetalOrExit()
+            requireMLXMetallibOrExit()
             if args.device == "cpu" {
                 try await Device.withDefaultDevice(.cpu) {
                     try await runRealtime(
@@ -583,6 +706,15 @@ Task {
                     showPartials: showPartials
                 )
             }
+
+        case .realtimeHosted(let sourceLanguage, let hostedModel, let enableServerVAD, let format, let showPartials):
+            try await runRealtimeHosted(
+                sourceLanguage: sourceLanguage,
+                model: hostedModel,
+                enableServerVAD: enableServerVAD,
+                format: format,
+                showPartials: showPartials
+            )
         }
 
         exit(0)

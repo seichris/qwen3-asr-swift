@@ -65,6 +65,11 @@ export QWEN3_ASR_DEBUG=1
 
 # Disable debug logs
 unset QWEN3_ASR_DEBUG
+
+# DashScope hosted realtime ASR (CLI + app)
+export DASHSCOPE_API_KEY="YOUR_DASHSCOPE_KEY"
+export DASHSCOPE_API_KEY_SG="YOUR_DASHSCOPE_SINGAPORE_KEY"
+export DASHSCOPE_REALTIME_MODEL="qwen3-asr-flash-realtime-2026-02-10"
 ```
 
 Run:
@@ -129,6 +134,11 @@ This repo includes a SwiftUI demo app with language pickers and a mic button:
 - Project: `Apps/Qwen3TranslateApp/Qwen3TranslateApp.xcodeproj`
 - Runs on iPhone (iOS) and Mac (macOS)
 - Requires iOS 18.0+ / macOS 15.0+ (Apple Translation)
+- Hosted ASR option: set `DASHSCOPE_API_KEY` (Mainland) or `DASHSCOPE_API_KEY_SG` (Singapore) in your Xcode Run scheme, then choose `DashScope Mainland` or `DashScope Singapore` in the ASR dropdown.
+- You can also paste these API keys in the app’s `Settings → API Keys` section (used when launching from Home Screen without Xcode-injected env vars).
+- Audio input option: choose `Microphone` or `Device Audio` in the Audio dropdown (`Device Audio` uses ReplayKit on iOS).
+- Hosted API reference (used by the app): [Qwen3 ASR Flash Realtime model page](https://bailian.console.alibabacloud.com/cn-beijing/?tab=model#/model-market/detail/qwen3-asr-flash-realtime-2026-02-10)
+- Hosted API reference (Singapore workspace): [Qwen3 ASR Flash Realtime docs](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=group-qwen3-asr-flash-realtime)
 
 ## Usage
 
@@ -195,6 +205,9 @@ qwen3-asr-cli transcribe audio.wav
 
 # Realtime microphone translation (Google)
 qwen3-asr-cli realtime --from cn --to en --translate-provider google
+
+# Realtime microphone transcription (DashScope hosted)
+qwen3-asr-cli realtime-hosted --from zh --show-partials
 
 # Japanese translation with JSONL output
 qwen3-asr-cli realtime --to ja --window 15 --jsonl

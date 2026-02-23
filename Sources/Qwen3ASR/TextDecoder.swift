@@ -5,14 +5,24 @@ import MLXFast
 
 /// RoPE (Rotary Position Embedding) implementation
 public class RoPE {
-    let dims: Int
+    let headDim: Int
+    let rotaryDim: Int
     let base: Float
     let scale: Float
+    let interleaved: Bool
 
-    public init(dims: Int, base: Float = 10000.0, scale: Float = 1.0) {
-        self.dims = dims
+    public init(
+        headDim: Int,
+        rotaryDim: Int? = nil,
+        base: Float = 10000.0,
+        scale: Float = 1.0,
+        interleaved: Bool = false
+    ) {
+        self.headDim = headDim
+        self.rotaryDim = rotaryDim ?? headDim
         self.base = base
         self.scale = scale
+        self.interleaved = interleaved
     }
 
     /// Apply RoPE to queries and keys
@@ -24,7 +34,7 @@ public class RoPE {
         let seqLen = q.dim(2)
 
         // Compute frequencies
-        let halfDim = dims / 2
+        let halfDim = rotaryDim / 2
         let freqSeq = MLXArray(0..<halfDim).asType(.float32)
         let invFreq = 1.0 / pow(MLXArray(base), freqSeq / Float(halfDim))
 
@@ -47,33 +57,46 @@ public class RoPE {
 
     private func applyRotation(_ x: MLXArray, cos cosAngles: MLXArray, sin sinAngles: MLXArray) -> MLXArray {
         // x shape: [batch, heads, seq, head_dim]
-        // Using interleaved rotation (traditional=False in MLX RoPE)
-        // This means we take even indices and odd indices, not first half and second half
-
-        // Extract interleaved components: x1 = x[..., 0::2], x2 = x[..., 1::2]
-        // MLX doesn't have step slicing, so we need to reshape and extract
         let batch = x.dim(0)
         let heads = x.dim(1)
         let seqLen = x.dim(2)
-        let headDim = x.dim(3)
-        let halfDim = headDim / 2
+        let hd = x.dim(3)
+        let rot = min(rotaryDim, hd)
+        let half = rot / 2
 
-        // Reshape to [batch, heads, seq, half_dim, 2] then extract
-        let xReshaped = x.reshaped(batch, heads, seqLen, halfDim, 2)
-        let x1 = xReshaped[.ellipsis, 0]  // Even indices [batch, heads, seq, half_dim]
-        let x2 = xReshaped[.ellipsis, 1]  // Odd indices [batch, heads, seq, half_dim]
+        // Split into rotary and passthrough tail.
+        let xRot = x[0..., 0..., 0..., 0..<rot]
+        let xTail = (rot < hd) ? x[0..., 0..., 0..., rot..<hd] : nil
 
-        // Reshape cos/sin for broadcasting: [1, 1, seq, half_dim]
+        // [seq, half] -> [1, 1, seq, half] for broadcast.
         let cosR = cosAngles.expandedDimensions(axes: [0, 1])
         let sinR = sinAngles.expandedDimensions(axes: [0, 1])
 
-        // Apply rotation: [x1 * cos - x2 * sin, x1 * sin + x2 * cos]
-        let rotated1 = x1 * cosR - x2 * sinR
-        let rotated2 = x1 * sinR + x2 * cosR
+        let rotated: MLXArray
+        if interleaved {
+            // Interleaved rotary: treat (d0,d1), (d2,d3), ... as pairs.
+            let paired = xRot.reshaped(batch, heads, seqLen, half, 2)
+            let x0 = paired[0..., 0..., 0..., 0..., 0..<1].squeezed(axis: -1)
+            let x1 = paired[0..., 0..., 0..., 0..., 1..<2].squeezed(axis: -1)
 
-        // Interleave back: stack and reshape
-        let stacked = stacked([rotated1, rotated2], axis: -1)  // [batch, heads, seq, half_dim, 2]
-        return stacked.reshaped(batch, heads, seqLen, headDim)
+            let r0 = x0 * cosR - x1 * sinR
+            let r1 = x1 * cosR + x0 * sinR
+
+            let out = concatenated([r0.expandedDimensions(axis: -1), r1.expandedDimensions(axis: -1)], axis: -1)
+            rotated = out.reshaped(batch, heads, seqLen, rot)
+        } else {
+            // rotate_half (split head_dim into two halves).
+            let x0 = xRot[0..., 0..., 0..., 0..<half]
+            let x1 = xRot[0..., 0..., 0..., half..<rot]
+            let r0 = x0 * cosR - x1 * sinR
+            let r1 = x1 * cosR + x0 * sinR
+            rotated = concatenated([r0, r1], axis: -1).reshaped(batch, heads, seqLen, rot)
+        }
+
+        if let xTail {
+            return concatenated([rotated, xTail], axis: -1).reshaped(batch, heads, seqLen, hd)
+        }
+        return rotated.reshaped(batch, heads, seqLen, hd)
     }
 }
 
@@ -99,7 +122,12 @@ public class TextAttention: Module {
         self.numKVHeads = config.numKVHeads
         self.headDim = config.headDim
         self.scale = 1.0 / sqrt(Float(headDim))
-        self.rope = RoPE(dims: headDim, base: config.ropeTheta)
+        self.rope = RoPE(
+            headDim: headDim,
+            rotaryDim: config.rotaryDim,
+            base: config.ropeTheta,
+            interleaved: config.ropeInterleaved
+        )
 
         let hiddenSize = config.hiddenSize
         self._qProj.wrappedValue = Linear(hiddenSize, numHeads * headDim, bias: false)

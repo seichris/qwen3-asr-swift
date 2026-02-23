@@ -112,40 +112,34 @@ final class RealtimeTranslationTests: XCTestCase {
     func testTokenizerEncodeWords() throws {
         let tokenizer = Qwen3Tokenizer()
 
-        // Create a simple vocab for testing
-        // Note: "Hello" (without space) becomes "Hello" in the processed text
-        // after stripping leading space and replacing spaces with "Ġ"
-        tokenizer.idToToken = [
-            0: "Hello",
-            1: "Ġworld",
-            2: "!",
-            3: "Ġtest",
-            4: "ing",
-            5: "Ġ",
-            6: "H",
-            7: "ello",
-            8: "w",
-            9: "o",
-            10: "r",
-            11: "l",
-            12: "d"
-        ]
+        // Build a minimal byte-level tokenizer fixture on disk.
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qwen3_tokenizer_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
 
-        for (id, token) in tokenizer.idToToken {
-            tokenizer.tokenToId[token] = id
-        }
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let vocab: [String: Int] = [
+            "H": 0, "e": 1, "l": 2, "o": 3,
+            "Ġ": 4, "w": 5, "r": 6, "d": 7, "!": 8
+        ]
+        let vocabData = try JSONSerialization.data(withJSONObject: vocab, options: [])
+        try vocabData.write(to: tmpDir.appendingPathComponent("vocab.json"))
+
+        // Empty-but-valid merges file (character-level fallback).
+        let merges = "#version: 0.2\n"
+        try merges.write(to: tmpDir.appendingPathComponent("merges.txt"), atomically: true, encoding: .utf8)
+
+        try tokenizer.load(from: tmpDir.appendingPathComponent("vocab.json"))
 
         // Test encoding
         let tokens = tokenizer.encode("Hello world!")
 
-        // Check that we got some tokens back
         XCTAssertGreaterThan(tokens.count, 0)
-        
-        // Should find "Hello" (token 0), "Ġworld" (token 1), and "!" (token 2)
-        // The tokenizer processes "Hello world!" as "HelloĠworld!" (leading space stripped, internal spaces -> Ġ)
-        XCTAssertTrue(tokens.contains(0), "Should contain 'Hello' token")
-        XCTAssertTrue(tokens.contains(1), "Should contain 'Ġworld' token") 
-        XCTAssertTrue(tokens.contains(2), "Should contain '!' token")
+        XCTAssertTrue(tokens.contains(8), "Should contain '!' token")
+
+        let decoded = tokenizer.decode(tokens: tokens)
+        XCTAssertEqual(decoded, "Hello world!")
     }
 
     // MARK: - Audio Source Tests

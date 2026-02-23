@@ -226,13 +226,11 @@ public class Qwen3ASRModel {
             return 256
         }()
 
-        // Qwen3-ASR prompt format (from mlx-audio implementation):
-        // <|im_start|>system\n<|im_end|>\n
+        // Qwen3-ASR prompt format (align with reference processor):
         // <|im_start|>user\n<|audio_start|><|audio_pad|>...<|audio_end|><|im_end|>\n
-        // <|im_start|>assistant\n[language X<asr_text>] <- model generates this if not specified
+        // <|im_start|>assistant\n[ language X<asr_text>]
         //
-        // If language is specified: <|im_start|>assistant\nlanguage {lang}<asr_text>
-        // If language is nil: <|im_start|>assistant\n (let model output "language X<asr_text>...")
+        // Note the leading space before "language" when forced.
 
         // Special token IDs
         let imStartId = 151644      // <|im_start|>
@@ -257,9 +255,6 @@ public class Qwen3ASRModel {
         let audioStartIndex: Int
         let audioEndIndex: Int
 
-        // <|im_start|>system\n<|im_end|>\n
-        inputIds.append(contentsOf: [imStartId, systemId, newlineId, imEndId, newlineId].map { Int32($0) })
-
         if isTextOnly {
             guard let tokenizer else {
                 Qwen3ASRDebug.log("Tokenizer not loaded; cannot run text-only generation")
@@ -269,6 +264,9 @@ public class Qwen3ASRModel {
                 Qwen3ASRDebug.log("Missing prompt; cannot run text-only generation")
                 return ""
             }
+
+            // Keep the legacy text-only chat template.
+            inputIds.append(contentsOf: [imStartId, systemId, newlineId, imEndId, newlineId].map { Int32($0) })
 
             // <|im_start|>user\n{prompt}<|im_end|>\n
             inputIds.append(contentsOf: [imStartId, userId, newlineId].map { Int32($0) })
@@ -281,9 +279,13 @@ public class Qwen3ASRModel {
 
             audioStartIndex = inputIds.count
             audioEndIndex = inputIds.count
-        } else {
-            // <|im_start|>user\n<|audio_start|><|audio_pad|>...<|audio_end|><|im_end|>\n
-            inputIds.append(contentsOf: [imStartId, userId, newlineId, audioStartId].map { Int32($0) })
+	        } else {
+	            // Match chat_template.json: always include a system message, even if empty.
+	            // <|im_start|>system\n<|im_end|>\n
+	            inputIds.append(contentsOf: [imStartId, systemId, newlineId, imEndId, newlineId].map { Int32($0) })
+
+	            // <|im_start|>user\n<|audio_start|><|audio_pad|>...<|audio_end|><|im_end|>\n
+	            inputIds.append(contentsOf: [imStartId, userId, newlineId, audioStartId].map { Int32($0) })
 
             let start = inputIds.count
             for _ in 0..<numAudioTokens {
@@ -298,10 +300,13 @@ public class Qwen3ASRModel {
 
             // Language handling (audio prompt only).
             if let lang = language, let tokenizer = tokenizer {
-                let langPrefix = "language \(lang)"
-                let langTokens = tokenizer.encode(langPrefix)
+                // Keep the leading space before "language" to match processor behavior.
+                let langPrefix = " language \(lang)<asr_text>"
+                var langTokens = tokenizer.encode(langPrefix)
+                if !langTokens.contains(asrTextId) {
+                    langTokens.append(asrTextId)
+                }
                 inputIds.append(contentsOf: langTokens.map { Int32($0) })
-                inputIds.append(Int32(asrTextId))
                 Qwen3ASRDebug.log("Forcing language: \(lang)")
             } else {
                 Qwen3ASRDebug.log("Auto-detect mode - model generates full language tag + text")
@@ -555,11 +560,21 @@ public class Qwen3ASRModel {
         }()
 
         // Continue generating
+        // In forced-language mode, we already include `<asr_text>` in the prompt, so we are
+        // effectively "inside" the ASR text region from the start of generation.
+        let promptHasASRText = (!isTextOnly && language != nil)
+        var seenASRTextTag = promptHasASRText
         for iteration in 1..<maxTokens {
             // Check for EOS
-            if nextToken == Int32(Qwen3ASRTokens.eosTokenId) {
+            // Hugging Face generation_config.json lists eos_token_id: [151643, 151645]
+            // i.e. <|endoftext|> and <|im_end|>. Stop on either.
+            if nextToken == Int32(Qwen3ASRTokens.eosTokenId) || nextToken == Int32(Qwen3ASRTokens.padTokenId) {
                 Qwen3ASRDebug.log("EOS token reached at iteration \(iteration)")
                 break
+            }
+
+            if nextToken == Int32(151704) { // <asr_text>
+                seenASRTextTag = true
             }
 
             // Get embedding for the new token
@@ -577,6 +592,40 @@ public class Qwen3ASRModel {
             nextToken = argMax(logits, axis: -1).squeezed().item(Int32.self)
             generatedTokens.append(nextToken)
 
+            // Stop on any special control token to avoid drifting into chat-template junk.
+            // (The decoder can emit these when it gets confused / doesn't emit EOS.)
+            if nextToken == Int32(Qwen3ASRTokens.imStartTokenId) ||
+                nextToken == Int32(Qwen3ASRTokens.audioStartTokenId) ||
+                nextToken == Int32(Qwen3ASRTokens.audioEndTokenId) ||
+                nextToken == Int32(Qwen3ASRTokens.audioTokenId) {
+                Qwen3ASRDebug.log("Stopping early due to control token: \(nextToken)")
+                break
+            }
+
+            // Early-stop heuristic for ASR: after we've entered the ASR text region, if the model
+            // starts repeating the same token many times, it's usually a degeneration loop.
+            if seenASRTextTag && generatedTokens.count >= 32 {
+                let last = generatedTokens.last!
+                var run = 0
+                for t in generatedTokens.reversed() {
+                    if t == last { run += 1 } else { break }
+                }
+                if run >= 16 {
+                    Qwen3ASRDebug.log("Stopping early due to repetition loop: token=\(last) run=\(run)")
+                    break
+                }
+            }
+
+            // Lower-diversity tail guard (catches loops like "cke cke cke..." even if run-length is short).
+            if seenASRTextTag && generatedTokens.count >= 64 {
+                let tail = generatedTokens.suffix(64)
+                let uniq = Set(tail).count
+                if uniq <= 4 {
+                    Qwen3ASRDebug.log("Stopping early due to low-diversity tail: unique=\(uniq)")
+                    break
+                }
+            }
+
             if Qwen3ASRDebug.enabled, streamTokens, iteration % 16 == 0 {
                 Qwen3ASRDebug.log("Tokens@\(iteration): \(Array(generatedTokens.suffix(16)))")
             }
@@ -588,11 +637,28 @@ public class Qwen3ASRModel {
 
         // Decode tokens to text
         if let tokenizer = tokenizer {
-            return tokenizer.decode(tokens: generatedTokens.map { Int($0) })
+            let raw = tokenizer.decode(tokens: generatedTokens.map { Int($0) })
+            let out = postProcessASROutput(raw)
+            if Qwen3ASRDebug.enabled {
+                let preview = out.prefix(200)
+                Qwen3ASRDebug.log("ASR_TEXT(len=\(out.count)): \(preview)")
+            }
+            return out
         } else {
             // Fallback: return token IDs
             return generatedTokens.map { String($0) }.joined(separator: " ")
         }
+    }
+
+    /// Qwen3-ASR raw output is often: "language {lang}<asr_text>{transcription}".
+    /// This strips everything up to and including the last "<asr_text>" tag.
+    private func postProcessASROutput(_ text: String) -> String {
+        let tag = "<asr_text>"
+        guard let r = text.range(of: tag, options: .backwards) else {
+            return text
+        }
+        let out = text[r.upperBound...]
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Generate text from a text prompt (no audio)
@@ -639,8 +705,9 @@ public extension Qwen3ASRModel {
         // Get cache directory
         let cacheDir = try getCacheDirectory(for: modelId)
 
-        // Download weights if needed
-        if !weightsExist(in: cacheDir) {
+        // Download artifacts if needed.
+        // Existing caches may contain weights but miss tokenizer files (e.g. merges.txt).
+        if !weightsExist(in: cacheDir) || !tokenizerArtifactsExist(in: cacheDir) {
             try await downloadWeights(modelId: modelId, to: cacheDir, progressHandler: { progress in
                 progressHandler?(0.1 + progress * 0.4, "Downloading weights...")
             })
@@ -650,10 +717,12 @@ public extension Qwen3ASRModel {
             _debugLogCachedArtifacts(cacheDir: cacheDir)
         }
 
-        progressHandler?(0.5, "Loading tokenizer...")
+	        progressHandler?(0.5, "Loading tokenizer...")
 
-        // Create model with default config
-        let model = Qwen3ASRModel()
+	        // Create model with config parsed from Hugging Face config.json when available.
+	        // Rotary (RoPE) flags in config.json materially affect correctness.
+	        let textConfig = (try? loadTextConfigIfPresent(cacheDir: cacheDir)) ?? .small
+	        let model = Qwen3ASRModel(textConfig: textConfig)
 
         // Do CPU-heavy synchronous work off the caller's executor (important for iOS UI responsiveness).
         try await runBlocking {
@@ -695,14 +764,62 @@ public extension Qwen3ASRModel {
         }
         #endif
 
-        progressHandler?(1.0, "Ready")
+	        progressHandler?(1.0, "Ready")
 
-        return model
-    }
+	        return model
+	    }
 
-    #if os(iOS)
-    private static func configureMLXMemoryForiOS() {
-        let env = ProcessInfo.processInfo.environment
+	    /// Load key text-decoder configuration from Hugging Face `config.json`.
+	    /// We intentionally only consume the subset that affects correctness in our implementation.
+	    private static func loadTextConfigIfPresent(cacheDir: URL) throws -> TextDecoderConfig? {
+	        let url = cacheDir.appendingPathComponent("config.json")
+	        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+
+	        let data = try Data(contentsOf: url)
+	        guard let rootAny = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+	        guard
+	            let thinker = rootAny["thinker_config"] as? [String: Any],
+	            let text = thinker["text_config"] as? [String: Any]
+	        else { return nil }
+
+	        var cfg = TextDecoderConfig.small
+
+	        func int(_ key: String) -> Int? { text[key] as? Int }
+	        func float(_ key: String) -> Float? {
+	            if let f = text[key] as? Double { return Float(f) }
+	            if let f = text[key] as? Float { return f }
+	            if let f = text[key] as? Int { return Float(f) }
+	            return nil
+	        }
+
+	        if let v = int("vocab_size") { cfg.vocabSize = v }
+	        if let v = int("hidden_size") { cfg.hiddenSize = v }
+	        if let v = int("num_hidden_layers") { cfg.numLayers = v }
+	        if let v = int("num_attention_heads") { cfg.numHeads = v }
+	        if let v = int("num_key_value_heads") { cfg.numKVHeads = v }
+	        if let v = int("head_dim") { cfg.headDim = v }
+	        if let v = int("intermediate_size") { cfg.intermediateSize = v }
+	        if let v = int("max_position_embeddings") { cfg.maxPositionEmbeddings = v }
+	        if let v = float("rms_norm_eps") { cfg.rmsNormEps = v }
+	        if let v = float("rope_theta") { cfg.ropeTheta = v }
+
+	        if let ropeScaling = text["rope_scaling"] as? [String: Any] {
+	            if let v = ropeScaling["interleaved"] as? Bool { cfg.ropeInterleaved = v }
+	            if let v = ropeScaling["mrope_interleaved"] as? Bool { cfg.mropeInterleaved = v }
+	            if let v = ropeScaling["mrope_section"] as? [Int] { cfg.mropeSection = v }
+	        }
+
+	        if let quant = rootAny["quantization"] as? [String: Any] {
+	            if let v = quant["group_size"] as? Int { cfg.groupSize = v }
+	            if let v = quant["bits"] as? Int { cfg.bits = v }
+	        }
+
+	        return cfg
+	    }
+
+	    #if os(iOS)
+	    private static func configureMLXMemoryForiOS() {
+	        let env = ProcessInfo.processInfo.environment
 
         func parseInt(_ key: String) -> Int? {
             guard let raw = env[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -747,6 +864,7 @@ public extension Qwen3ASRModel {
             "config.json",
             "vocab.json",
             "tokenizer_config.json",
+            "merges.txt",
             "model.safetensors",
         ]
 
@@ -907,6 +1025,18 @@ public extension Qwen3ASRModel {
         return contents.contains { $0.pathExtension == "safetensors" }
     }
 
+    private static func tokenizerArtifactsExist(in directory: URL) -> Bool {
+        let fm = FileManager.default
+        let required = [
+            "vocab.json",
+            "tokenizer_config.json",
+            "merges.txt",
+        ]
+        return required.allSatisfy { name in
+            fm.fileExists(atPath: directory.appendingPathComponent(name).path)
+        }
+    }
+
     static func _validatedRemoteFileName(_ file: String) throws -> String {
         // Reject any attempt to provide a path instead of a single file name.
         let base = URL(fileURLWithPath: file).lastPathComponent
@@ -950,7 +1080,8 @@ public extension Qwen3ASRModel {
         var filesToDownload = [
             "config.json",
             "vocab.json",
-            "tokenizer_config.json"
+            "tokenizer_config.json",
+            "merges.txt",
         ]
 
         // Determine model file(s) to download

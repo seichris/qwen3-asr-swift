@@ -57,11 +57,27 @@ public struct TextDecoderConfig: Codable, Sendable {
     public var ropeScaling: RopeScaling? = nil
     public var tieWordEmbeddings: Bool = true
 
+    // Hugging Face Qwen3-ASR configs set rope_scaling.interleaved=true and mrope_* fields.
+    // These materially affect rotary application.
+    public var ropeInterleaved: Bool = true
+    public var mropeInterleaved: Bool = true
+    public var mropeSection: [Int]? = nil
+
     // Quantization config
     public var groupSize: Int = 64
     public var bits: Int = 4
 
     public init() {}
+
+    /// Rotary dimension in the per-head projection.
+    /// When mrope_section is present, it specifies the rotary half-dim sections and
+    /// rotaryDim = 2 * sum(sections). If absent, rotaryDim = headDim (full rotary).
+    public var rotaryDim: Int {
+        let half = headDim / 2
+        let s = mropeSection?.reduce(0, +) ?? half
+        let clamped = max(0, min(s, half))
+        return min(headDim, clamped * 2)
+    }
 
     /// Config for Qwen3-ASR-0.6B decoder (from HuggingFace model config)
     public static var small: TextDecoderConfig {
@@ -74,6 +90,8 @@ public struct TextDecoderConfig: Codable, Sendable {
         config.intermediateSize = 3072
         config.groupSize = 64
         config.bits = 4
+        config.ropeInterleaved = true
+        config.mropeInterleaved = true
         return config
     }
 

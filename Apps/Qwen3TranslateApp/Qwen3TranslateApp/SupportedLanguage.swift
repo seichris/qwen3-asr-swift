@@ -5,6 +5,9 @@ struct SupportedLanguage: Identifiable, Hashable {
     let displayName: String     // UI label
     let modelName: String       // Qwen3-ASR prompt language name (e.g. "Chinese")
 
+    /// Auto-detect source language (pass nil to the model).
+    static let autoDetect = SupportedLanguage(id: "auto", displayName: "Auto-detect", modelName: "auto")
+
     static let chinese = SupportedLanguage(id: "zh", displayName: "Chinese", modelName: "Chinese")
     static let english = SupportedLanguage(id: "en", displayName: "English", modelName: "English")
     static let japanese = SupportedLanguage(id: "ja", displayName: "Japanese", modelName: "Japanese")
@@ -33,5 +36,12 @@ struct SupportedLanguage: Identifiable, Hashable {
         .arabic,
         .hindi,
     ]
-}
 
+    static let sources: [SupportedLanguage] = [.autoDetect] + all
+    static let targets: [SupportedLanguage] = all
+
+    /// Pass to `Qwen3ASRModel.transcribe(language:)` / `RealtimeTranslationOptions.sourceLanguage`.
+    var modelNameOptional: String? {
+        id == "auto" ? nil : modelName
+    }
+}

@@ -15,8 +15,22 @@ public enum TokenizerError: Error, LocalizedError {
 
 /// Simple tokenizer for Qwen3-ASR that loads from vocab.json
 public class Qwen3Tokenizer {
+    private struct Pair: Hashable {
+        let first: String
+        let second: String
+    }
+
     internal var idToToken: [Int: String] = [:]
     internal var tokenToId: [String: Int] = [:]
+    private var bpeRanks: [Pair: Int] = [:]
+    private var bpeCache: [String: [String]] = [:]
+    private var specialTokensSorted: [String] = []
+
+    private static let pretokenizationRegex: NSRegularExpression = {
+        // GPT-2 / byte-level BPE pre-tokenization pattern.
+        let pattern = "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
+        return try! NSRegularExpression(pattern: pattern, options: [])
+    }()
 
     public var eosTokenId: Int = 151643
     public var padTokenId: Int = 151643
@@ -43,6 +57,18 @@ public class Qwen3Tokenizer {
         if FileManager.default.fileExists(atPath: configUrl.path) {
             try loadAddedTokens(from: configUrl)
         }
+
+        // Load BPE merge ranks (required for correct byte-level BPE tokenization).
+        let mergesUrl = url.deletingLastPathComponent().appendingPathComponent("merges.txt")
+        guard FileManager.default.fileExists(atPath: mergesUrl.path) else {
+            throw TokenizerError.invalidFormat("Missing merges.txt next to vocab.json")
+        }
+        try loadMerges(from: mergesUrl)
+
+        // Special tokens should be matched as whole strings before BPE.
+        specialTokensSorted = tokenToId.keys
+            .filter { $0.hasPrefix("<") && $0.hasSuffix(">") }
+            .sorted { $0.count > $1.count }
 
         Qwen3ASRDebug.log("Loaded tokenizer with \(idToToken.count) tokens")
     }
@@ -73,39 +99,64 @@ public class Qwen3Tokenizer {
         }
     }
 
+    /// Load GPT-2 style BPE merges.
+    private func loadMerges(from url: URL) throws {
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        bpeRanks.removeAll(keepingCapacity: true)
+        bpeCache.removeAll(keepingCapacity: true)
+
+        var rank = 0
+        for rawLine in contents.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("#") {
+                continue
+            }
+            let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count == 2 else {
+                continue
+            }
+            let pair = Pair(first: String(parts[0]), second: String(parts[1]))
+            bpeRanks[pair] = rank
+            rank += 1
+        }
+        Qwen3ASRDebug.log("Loaded \(rank) BPE merges from merges.txt")
+    }
+
     /// Decode token IDs to text
     public func decode(tokens: [Int]) -> String {
-        var result = ""
+        // IMPORTANT:
+        // Byte-level BPE tokens represent *bytes* (mapped to unicode). A single UTF-8 codepoint
+        // can span multiple bytes, and the BPE boundary can fall in the middle of that sequence.
+        // Therefore decoding must be done on the concatenated byte stream, not token-by-token.
+
+        var stitched = ""
+        stitched.reserveCapacity(tokens.count * 2)
 
         for tokenId in tokens {
-            if let token = idToToken[tokenId] {
-                // Handle special tokens - skip most but keep some for parsing
-                if token.hasPrefix("<|") && token.hasSuffix("|>") {
-                    // Skip special tokens like <|endoftext|>, <|im_start|>, etc.
-                    continue
-                }
+            guard let token = idToToken[tokenId] else { continue }
 
-                // Keep <asr_text> and similar markers that don't have |> suffix
-                // These are needed for output parsing
-                if token.hasPrefix("<") && token.hasSuffix(">") && !token.contains("|") {
-                    result += token
-                    continue
-                }
+            // Skip chat special tokens like <|im_start|>, <|im_end|>, etc.
+            if token.hasPrefix("<|") && token.hasSuffix("|>") {
+                continue
+            }
 
-                // Handle byte-level tokens (Ġ prefix means space)
-                var decodedToken = token
-                if decodedToken.hasPrefix("Ġ") {
-                    decodedToken = " " + String(decodedToken.dropFirst())
-                }
+            // Preserve markers like <asr_text> (these are ASCII and decode cleanly).
+            if token.hasPrefix("<") && token.hasSuffix(">") && !token.contains("|") {
+                stitched += token
+                continue
+            }
 
-                // Handle other byte-level encodings
-                decodedToken = decodeByteLevelToken(decodedToken)
-
-                result += decodedToken
+            // GPT-2 byte-level space indicator.
+            if token.hasPrefix("Ġ") {
+                stitched += " "
+                stitched += String(token.dropFirst())
+            } else {
+                stitched += token
             }
         }
 
-        return result.trimmingCharacters(in: .whitespaces)
+        let decoded = decodeByteLevelToken(stitched)
+        return decoded.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Byte-to-unicode mapping table (GPT-2 style)
@@ -173,38 +224,129 @@ public class Qwen3Tokenizer {
     /// - Parameter text: Input text to encode
     /// - Returns: Array of token IDs
     public func encode(_ text: String) -> [Int] {
-        // Preprocess text: replace spaces with "Ġ" (GPT-2 BPE convention)
-        var processedText = text
-        if processedText.hasPrefix(" ") {
-            processedText = String(processedText.dropFirst())
+        guard !text.isEmpty else { return [] }
+
+        var tokenIds: [Int] = []
+        var cursor = text.startIndex
+
+        while cursor < text.endIndex {
+            if let (token, tokenId) = matchSpecialToken(in: text, at: cursor) {
+                tokenIds.append(tokenId)
+                cursor = text.index(cursor, offsetBy: token.count)
+                continue
+            }
+
+            let nextSpecial = nextSpecialTokenStart(in: text, from: cursor) ?? text.endIndex
+            let segment = String(text[cursor..<nextSpecial])
+            tokenIds.append(contentsOf: encodeOrdinaryText(segment))
+            cursor = nextSpecial
         }
-        processedText = processedText.replacingOccurrences(of: " ", with: "Ġ")
 
-        var tokens: [Int] = []
-        var remaining = processedText
+        return tokenIds
+    }
 
-        while !remaining.isEmpty {
-            var longestMatch: (token: String, id: Int)? = nil
+    private func matchSpecialToken(in text: String, at index: String.Index) -> (String, Int)? {
+        let suffix = text[index...]
+        for token in specialTokensSorted {
+            guard suffix.hasPrefix(token), let id = tokenToId[token] else { continue }
+            return (token, id)
+        }
+        return nil
+    }
 
-            // Find longest matching token starting from position 0
-            for length in (1...min(remaining.count, 50)).reversed() {
-                let prefix = String(remaining.prefix(length))
-                if let id = tokenToId[prefix] {
-                    longestMatch = (prefix, id)
-                    break
+    private func nextSpecialTokenStart(in text: String, from index: String.Index) -> String.Index? {
+        var earliest: String.Index? = nil
+        for token in specialTokensSorted {
+            guard let range = text.range(of: token, range: index..<text.endIndex) else { continue }
+            if earliest == nil || range.lowerBound < earliest! {
+                earliest = range.lowerBound
+            }
+        }
+        return earliest
+    }
+
+    private func encodeOrdinaryText(_ text: String) -> [Int] {
+        guard !text.isEmpty else { return [] }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let matches = Self.pretokenizationRegex.matches(in: text, options: [], range: fullRange)
+        var tokenIds: [Int] = []
+
+        for match in matches {
+            guard let range = Range(match.range, in: text) else { continue }
+            let piece = String(text[range])
+            if piece.isEmpty { continue }
+
+            let bytes = [UInt8](piece.utf8)
+            let mapped = String(bytes.map { Self.byteToUnicode[$0]! })
+            let bpeTokens = applyBPE(to: mapped)
+
+            for token in bpeTokens {
+                if let id = tokenToId[token] {
+                    tokenIds.append(id)
+                }
+            }
+        }
+
+        return tokenIds
+    }
+
+    private func applyBPE(to token: String) -> [String] {
+        if let cached = bpeCache[token] {
+            return cached
+        }
+        if token.count <= 1 {
+            bpeCache[token] = [token]
+            return [token]
+        }
+
+        var word = token.map { String($0) }
+        var pairs = getPairs(word)
+
+        while !pairs.isEmpty {
+            var bestPair: Pair? = nil
+            var bestRank = Int.max
+            for pair in pairs {
+                guard let rank = bpeRanks[pair], rank < bestRank else { continue }
+                bestRank = rank
+                bestPair = pair
+            }
+
+            guard let pairToMerge = bestPair else { break }
+
+            var merged: [String] = []
+            merged.reserveCapacity(word.count)
+            var i = 0
+            while i < word.count {
+                if i < word.count - 1 &&
+                    word[i] == pairToMerge.first &&
+                    word[i + 1] == pairToMerge.second {
+                    merged.append(pairToMerge.first + pairToMerge.second)
+                    i += 2
+                } else {
+                    merged.append(word[i])
+                    i += 1
                 }
             }
 
-            if let match = longestMatch {
-                tokens.append(match.id)
-                remaining = String(remaining.dropFirst(match.token.count))
-            } else {
-                // No match found, skip this character
-                remaining = String(remaining.dropFirst())
-            }
+            word = merged
+            if word.count == 1 { break }
+            pairs = getPairs(word)
         }
 
-        return tokens
+        bpeCache[token] = word
+        return word
+    }
+
+    private func getPairs(_ word: [String]) -> Set<Pair> {
+        guard word.count >= 2 else { return [] }
+        var pairs = Set<Pair>()
+        pairs.reserveCapacity(word.count - 1)
+        for i in 0..<(word.count - 1) {
+            pairs.insert(Pair(first: word[i], second: word[i + 1]))
+        }
+        return pairs
     }
 
     /// Get token ID for a specific token string

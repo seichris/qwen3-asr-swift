@@ -210,10 +210,12 @@ public class QuantizedTextAttention: Module {
 
     private func applyRoPE(_ q: MLXArray, _ k: MLXArray, offset: Int) -> (MLXArray, MLXArray) {
         let seqLen = q.dim(2)
-        let halfDim = headDim / 2
+        let rotDim = min(config.rotaryDim, headDim)
+        let halfDim = rotDim / 2
 
-        // Compute inverse frequencies: inv_freq[i] = 1.0 / (base ** (2*i / dim))
-        // This is equivalent to: exp(-i * log(base) / half_dim) for i in [0, half_dim)
+        // Compute inverse frequencies: inv_freq[i] = 1.0 / (base ** (2*i / dim)).
+        // For dim=headDim and i in [0, headDim/2), this is:
+        // exp(-i * log(base) / (headDim/2)).
         let freqSeq = MLXArray(0..<halfDim).asType(.float32)
         let invFreq = exp(-freqSeq * (log(MLXArray(config.ropeTheta)) / Float(halfDim)))
 
@@ -227,28 +229,42 @@ public class QuantizedTextAttention: Module {
         let cosAngles = cos(angles)
         let sinAngles = sin(angles)
 
-        // Apply split-half rotation (NOT interleaved - this is what mlx-audio/Qwen uses)
-        // First half and second half of the head_dim are rotated together
-        func rotateSplitHalf(_ x: MLXArray) -> MLXArray {
-            // x shape: [batch, heads, seq, head_dim]
-            // Split into first half [0:half_dim] and second half [half_dim:dim]
-            let x1 = x[0..., 0..., 0..., 0..<halfDim]  // [batch, heads, seq, half_dim]
-            // Avoid open-ended slices on iOS/Metal; some builds have had slicing quirks.
-            let x2 = x[0..., 0..., 0..., halfDim..<headDim]   // [batch, heads, seq, half_dim]
+        // [seq, half] -> [1,1,seq,half] for broadcast
+        let cosR = cosAngles.expandedDimensions(axes: [0, 1])
+        let sinR = sinAngles.expandedDimensions(axes: [0, 1])
 
-            // Expand cos/sin for broadcasting: [seq, half_dim] -> [1, 1, seq, half_dim]
-            let cosR = cosAngles.expandedDimensions(axes: [0, 1])
-            let sinR = sinAngles.expandedDimensions(axes: [0, 1])
+        func rotate(_ x: MLXArray) -> MLXArray {
+            let batch = x.dim(0)
+            let heads = x.dim(1)
+            let hd = x.dim(3)
 
-            // Apply rotation: (x1 * cos - x2 * sin, x1 * sin + x2 * cos)
-            let rotated1 = x1 * cosR - x2 * sinR
-            let rotated2 = x1 * sinR + x2 * cosR
+            let xRot = x[0..., 0..., 0..., 0..<rotDim]
+            let xTail = (rotDim < hd) ? x[0..., 0..., 0..., rotDim..<hd] : nil
 
-            // Concatenate back: [rotated1, rotated2] along last axis
-            return concatenated([rotated1, rotated2], axis: -1)
+            let rotated: MLXArray
+            if config.ropeInterleaved {
+                let paired = xRot.reshaped(batch, heads, seqLen, halfDim, 2)
+                let x0 = paired[0..., 0..., 0..., 0..., 0..<1].squeezed(axis: -1)
+                let x1 = paired[0..., 0..., 0..., 0..., 1..<2].squeezed(axis: -1)
+                let r0 = x0 * cosR - x1 * sinR
+                let r1 = x1 * cosR + x0 * sinR
+                let out = concatenated([r0.expandedDimensions(axis: -1), r1.expandedDimensions(axis: -1)], axis: -1)
+                rotated = out.reshaped(batch, heads, seqLen, rotDim)
+            } else {
+                let x0 = xRot[0..., 0..., 0..., 0..<halfDim]
+                let x1 = xRot[0..., 0..., 0..., halfDim..<rotDim]
+                let r0 = x0 * cosR - x1 * sinR
+                let r1 = x1 * cosR + x0 * sinR
+                rotated = concatenated([r0, r1], axis: -1).reshaped(batch, heads, seqLen, rotDim)
+            }
+
+            if let xTail {
+                return concatenated([rotated, xTail], axis: -1).reshaped(batch, heads, seqLen, hd)
+            }
+            return rotated.reshaped(batch, heads, seqLen, hd)
         }
 
-        return (rotateSplitHalf(q), rotateSplitHalf(k))
+        return (rotate(q), rotate(k))
     }
 }
 

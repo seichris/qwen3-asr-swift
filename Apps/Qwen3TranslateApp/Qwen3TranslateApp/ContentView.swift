@@ -12,7 +12,36 @@ struct ContentView: View {
 
     private struct RunTaskID: Equatable {
         var isRunning: Bool
-        var provider: TranslationProvider
+        var asrProvider: ASRProvider
+        var translationProvider: TranslationProvider
+        var inputSource: RealtimeInputAudioSource
+    }
+
+    private enum ASRProvider: String, CaseIterable, Identifiable, Equatable {
+        case local
+        case dashScopeMainland
+        case dashScopeSingapore
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .local: return "Local ASR"
+            case .dashScopeMainland: return "Alibaba Mainland"
+            case .dashScopeSingapore: return "Alibaba Singapore"
+            }
+        }
+
+        var dashScopeWorkspace: DashScopeWorkspace? {
+            switch self {
+            case .local:
+                return nil
+            case .dashScopeMainland:
+                return .mainland
+            case .dashScopeSingapore:
+                return .singapore
+            }
+        }
     }
 
     private enum TranslationProvider: String, CaseIterable, Identifiable, Equatable {
@@ -24,8 +53,8 @@ struct ContentView: View {
 
         var displayName: String {
             switch self {
-            case .apple: return "Apple"
-            case .googleCloud: return "Google Cloud"
+            case .apple: return "Apple Local Translate"
+            case .googleCloud: return "Google Cloud Translate"
             case .off: return "Off"
             }
         }
@@ -33,6 +62,8 @@ struct ContentView: View {
 
     @State private var from = SupportedLanguage.chinese
     @State private var to = SupportedLanguage.english
+    @State private var asrProvider: ASRProvider
+    @State private var inputSource: RealtimeInputAudioSource = .microphone
     @State private var translationProvider: TranslationProvider
     @State private var showSettings = false
 
@@ -45,10 +76,32 @@ struct ContentView: View {
     private let modelIdDefault = "mlx-community/Qwen3-ASR-0.6B-4bit"
 
     init() {
-        let key = ProcessInfo.processInfo.environment["QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let defaultProvider: TranslationProvider = (key?.isEmpty == false) ? .googleCloud : .apple
-        _translationProvider = State(initialValue: defaultProvider)
+        let env = ProcessInfo.processInfo.environment
+        func readCredential(_ key: String) -> String? {
+            let envValue = env[key]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let envValue, !envValue.isEmpty { return envValue }
+
+            let storedValue = UserDefaults.standard.string(forKey: key)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let storedValue, !storedValue.isEmpty { return storedValue }
+
+            return nil
+        }
+
+        let dashScopeKey = readCredential(DashScopeRealtimeClient.apiKeyEnvironmentVariable)
+        let googleKey = readCredential("QWEN3_ASR_GOOGLE_TRANSLATE_API_KEY")
+        let dashScopeKeySG = readCredential("DASHSCOPE_API_KEY_SG")
+        let defaultASRProvider: ASRProvider = {
+            if dashScopeKeySG?.isEmpty == false { return .dashScopeSingapore }
+            if dashScopeKey?.isEmpty == false { return .dashScopeMainland }
+            return .local
+        }()
+        let defaultTranslationProvider: TranslationProvider = {
+            if googleKey?.isEmpty == false { return .googleCloud }
+            return .apple
+        }()
+        _asrProvider = State(initialValue: defaultASRProvider)
+        _translationProvider = State(initialValue: defaultTranslationProvider)
     }
 
     var body: some View {
@@ -86,25 +139,59 @@ struct ContentView: View {
         .onChange(of: translationProvider) { _, _ in
             if vm.isRunning { vm.requestStop() }
         }
+        .onChange(of: asrProvider) { _, _ in
+            if vm.isRunning { vm.requestStop() }
+        }
+        .onChange(of: inputSource) { _, _ in
+            if vm.isRunning { vm.requestStop() }
+        }
         .translationTask((vm.isRunning && translationProvider == .apple) ? translationConfig : nil) { session in
             // Runs while active; cancelled automatically when `translationConfig` becomes nil.
-            await vm.run(
-                translationSession: session,
-                modelId: modelIdDefault,
-                from: from,
-                to: to
-            )
+            switch asrProvider {
+            case .local:
+                await vm.run(
+                    translationSession: session,
+                    modelId: modelIdDefault,
+                    from: from,
+                    to: to,
+                    inputSource: inputSource
+                )
+            case .dashScopeMainland, .dashScopeSingapore:
+                guard let workspace = asrProvider.dashScopeWorkspace else { return }
+                await vm.runDashScopeHosted(
+                    translationSession: session,
+                    from: from,
+                    to: to,
+                    workspace: workspace,
+                    inputSource: inputSource
+                )
+            }
         }
-        .task(id: RunTaskID(isRunning: vm.isRunning, provider: translationProvider)) {
+        .task(id: RunTaskID(isRunning: vm.isRunning, asrProvider: asrProvider, translationProvider: translationProvider, inputSource: inputSource)) {
             guard vm.isRunning else { return }
-            switch translationProvider {
-            case .off:
-                await vm.runNoTranslation(modelId: modelIdDefault, from: from)
-            case .googleCloud:
-                await vm.runGoogleTranslation(modelId: modelIdDefault, from: from, to: to)
-            case .apple:
-                // Handled by `.translationTask`.
-                break
+
+            switch asrProvider {
+            case .local:
+                switch translationProvider {
+                case .off:
+                    await vm.runNoTranslation(modelId: modelIdDefault, from: from, inputSource: inputSource)
+                case .googleCloud:
+                    await vm.runGoogleTranslation(modelId: modelIdDefault, from: from, to: to, inputSource: inputSource)
+                case .apple:
+                    // Handled by `.translationTask`.
+                    break
+                }
+            case .dashScopeMainland, .dashScopeSingapore:
+                guard let workspace = asrProvider.dashScopeWorkspace else { return }
+                switch translationProvider {
+                case .off:
+                    await vm.runDashScopeHosted(from: from, workspace: workspace, inputSource: inputSource)
+                case .googleCloud:
+                    await vm.runDashScopeHostedGoogle(from: from, to: to, workspace: workspace, inputSource: inputSource)
+                case .apple:
+                    // Handled by `.translationTask`.
+                    break
+                }
             }
         }
     }
@@ -130,8 +217,9 @@ struct ContentView: View {
                         toPicker
                     }
                     HStack(spacing: 10) {
-                        providerPicker
-                        Spacer(minLength: 0)
+                        asrProviderPicker
+                        inputSourcePicker
+                        translationProviderPicker
                     }
                 }
             } else {
@@ -139,7 +227,9 @@ struct ContentView: View {
                     fromPicker
                     swapButton
                     toPicker
-                    providerPicker
+                    asrProviderPicker
+                    inputSourcePicker
+                    translationProviderPicker
                 }
             }
             #else
@@ -147,7 +237,9 @@ struct ContentView: View {
                 fromPicker
                 swapButton
                 toPicker
-                providerPicker
+                asrProviderPicker
+                inputSourcePicker
+                translationProviderPicker
             }
             #endif
         }
@@ -155,7 +247,7 @@ struct ContentView: View {
 
     private var fromPicker: some View {
         Picker("From", selection: $from) {
-            ForEach(SupportedLanguage.all) { lang in
+            ForEach(SupportedLanguage.sources) { lang in
                 Text(lang.displayName)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -170,7 +262,7 @@ struct ContentView: View {
 
     private var toPicker: some View {
         Picker("To", selection: $to) {
-            ForEach(SupportedLanguage.all) { lang in
+            ForEach(SupportedLanguage.targets) { lang in
                 Text(lang.displayName)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -183,13 +275,43 @@ struct ContentView: View {
         .disabled(vm.isRunning)
     }
 
-    private var providerPicker: some View {
+    private var asrProviderPicker: some View {
+        Picker("ASR", selection: $asrProvider) {
+            ForEach(ASRProvider.allCases) { p in
+                Text(p.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .tag(p)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .disabled(vm.isRunning)
+    }
+
+    private var translationProviderPicker: some View {
         Picker("Translate", selection: $translationProvider) {
             ForEach(TranslationProvider.allCases) { p in
                 Text(p.displayName)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .tag(p)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .disabled(vm.isRunning)
+    }
+
+    private var inputSourcePicker: some View {
+        Picker("Audio", selection: $inputSource) {
+            ForEach(availableInputSources) { source in
+                Text(source.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .tag(source)
             }
         }
         .pickerStyle(.menu)
@@ -216,32 +338,45 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Transcript")
                     .font(.headline)
-                if !vm.partialTranscript.isEmpty {
-                    CopyableTextBox(
-                        text: vm.partialTranscript,
-                        selectable: false,
-                        onDoubleClickCopy: false
-                    )
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Divider()
-
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(vm.segments) { seg in
-                        VStack(alignment: .leading, spacing: 6) {
-                            CopyableTextBox(text: seg.transcript)
-                            if translationProvider != .off, let t = seg.translation, !t.isEmpty {
-                                CopyableTextBox(text: t)
-                            }
-                        }
+                if combinedTranscriptText.isEmpty {
+                    Text("No transcript yet.")
+                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                        .padding(.vertical, 8)
+                } else {
+                    CopyableTextBox(text: combinedTranscriptText)
                 }
             }
         }
+    }
+
+    private var combinedTranscriptText: String {
+        var rows: [String] = []
+
+        for seg in vm.segments {
+            let transcript = seg.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !transcript.isEmpty {
+                rows.append(transcript)
+            }
+
+            if translationProvider != .off {
+                let translation = seg.translation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !translation.isEmpty {
+                    rows.append(translation)
+                }
+            }
+        }
+
+        let partial = vm.partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !partial.isEmpty {
+            rows.append(partial)
+        }
+
+        return rows.joined(separator: "\n")
     }
 
     private var micBar: some View {
@@ -297,5 +432,13 @@ struct ContentView: View {
             source: .init(identifier: from.id),
             target: .init(identifier: to.id)
         )
+    }
+
+    private var availableInputSources: [RealtimeInputAudioSource] {
+        #if os(iOS) && canImport(ReplayKit)
+        return RealtimeInputAudioSource.allCases
+        #else
+        return [.microphone]
+        #endif
     }
 }

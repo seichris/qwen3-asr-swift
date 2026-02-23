@@ -157,9 +157,11 @@ final class Qwen3ASRTests: XCTestCase {
             .appendingPathComponent("mlx-community_Qwen3-ASR-0.6B-4bit")
 
         let vocabPath = cacheDir.appendingPathComponent("vocab.json")
+        let mergesPath = cacheDir.appendingPathComponent("merges.txt")
 
-        guard FileManager.default.fileExists(atPath: vocabPath.path) else {
-            throw XCTSkip("Tokenizer vocab.json not found - run model download first")
+        guard FileManager.default.fileExists(atPath: vocabPath.path),
+              FileManager.default.fileExists(atPath: mergesPath.path) else {
+            throw XCTSkip("Tokenizer vocab/merges not found - run model download first")
         }
 
         let tokenizer = Qwen3Tokenizer()
@@ -177,9 +179,11 @@ final class Qwen3ASRTests: XCTestCase {
             .appendingPathComponent("mlx-community_Qwen3-ASR-0.6B-4bit")
 
         let vocabPath = cacheDir.appendingPathComponent("vocab.json")
+        let mergesPath = cacheDir.appendingPathComponent("merges.txt")
 
-        guard FileManager.default.fileExists(atPath: vocabPath.path) else {
-            throw XCTSkip("Tokenizer vocab.json not found - run model download first")
+        guard FileManager.default.fileExists(atPath: vocabPath.path),
+              FileManager.default.fileExists(atPath: mergesPath.path) else {
+            throw XCTSkip("Tokenizer vocab/merges not found - run model download first")
         }
 
         let tokenizer = Qwen3Tokenizer()
@@ -195,15 +199,44 @@ final class Qwen3ASRTests: XCTestCase {
         XCTAssertEqual(tokenizer.getTokenId(for: "<|endoftext|>"), 151643, "Should have <|endoftext|> token")
     }
 
+    func testTokenizerPreservesLeadingSpacePrefixToken() throws {
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("qwen3-asr")
+            .appendingPathComponent("mlx-community_Qwen3-ASR-0.6B-4bit")
+
+        let vocabPath = cacheDir.appendingPathComponent("vocab.json")
+        let mergesPath = cacheDir.appendingPathComponent("merges.txt")
+
+        guard FileManager.default.fileExists(atPath: vocabPath.path),
+              FileManager.default.fileExists(atPath: mergesPath.path) else {
+            throw XCTSkip("Tokenizer vocab/merges not found - run model download first")
+        }
+
+        let tokenizer = Qwen3Tokenizer()
+        try tokenizer.load(from: vocabPath)
+
+        guard let spacedLanguageId = tokenizer.getTokenId(for: "Ġlanguage") else {
+            XCTFail("Missing Ġlanguage token in vocab")
+            return
+        }
+
+        let encoded = tokenizer.encode(" language Chinese<asr_text>")
+        XCTAssertFalse(encoded.isEmpty, "Encoding should not be empty")
+        XCTAssertEqual(encoded.first, spacedLanguageId, "Leading space should encode as Ġlanguage token")
+        XCTAssertTrue(encoded.contains(151704), "Should contain <asr_text> token")
+    }
+
     func testTokenizerDecodeWithASRMarker() throws {
         let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("qwen3-asr")
             .appendingPathComponent("mlx-community_Qwen3-ASR-0.6B-4bit")
 
         let vocabPath = cacheDir.appendingPathComponent("vocab.json")
+        let mergesPath = cacheDir.appendingPathComponent("merges.txt")
 
-        guard FileManager.default.fileExists(atPath: vocabPath.path) else {
-            throw XCTSkip("Tokenizer vocab.json not found - run model download first")
+        guard FileManager.default.fileExists(atPath: vocabPath.path),
+              FileManager.default.fileExists(atPath: mergesPath.path) else {
+            throw XCTSkip("Tokenizer vocab/merges not found - run model download first")
         }
 
         let tokenizer = Qwen3Tokenizer()
@@ -235,9 +268,11 @@ final class Qwen3ASRTests: XCTestCase {
             .appendingPathComponent("mlx-community_Qwen3-ASR-0.6B-4bit")
 
         let vocabPath = cacheDir.appendingPathComponent("vocab.json")
+        let mergesPath = cacheDir.appendingPathComponent("merges.txt")
 
-        guard FileManager.default.fileExists(atPath: vocabPath.path) else {
-            throw XCTSkip("Tokenizer vocab.json not found - run model download first")
+        guard FileManager.default.fileExists(atPath: vocabPath.path),
+              FileManager.default.fileExists(atPath: mergesPath.path) else {
+            throw XCTSkip("Tokenizer vocab/merges not found - run model download first")
         }
 
         let tokenizer = Qwen3Tokenizer()
